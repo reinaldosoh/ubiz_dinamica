@@ -1,6 +1,3 @@
 {
-  "buildCommand": "cd netcom-crm && npm install && npm run build",
-  "outputDirectory": "netcom-crm/.vercel/output",
-  "installCommand": "cd netcom-crm && npm install",
-  "framework": null
+  "rootDirectory": "netcom-crm"
 }
