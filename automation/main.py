@@ -205,29 +205,48 @@ def get_or_create_driver(headless: bool = False):
     driver_logged_in = False
     return global_driver, False  # Novo driver, precisa logar
 
+# Armazenar último email usado para detectar mudança de conta
+last_logged_email = None
+
 @app.post("/dinamica/atualizar", response_model=DinamicaResponse)
 async def atualizar_dinamica(request: DinamicaRequest):
     """
     Realiza login, navega até Tarifas Dinâmicas, edita ***Geral manual e salva
     """
-    global global_driver, driver_logged_in
+    global global_driver, driver_logged_in, last_logged_email
+    
+    print(f"=== INICIANDO AUTOMAÇÃO ===")
+    print(f"Email recebido: {request.email}")
+    print(f"Multiplicador: {request.multiplicador}")
+    print(f"Headless: {request.headless}")
     
     try:
+        # Se mudou de conta, forçar novo login
+        if last_logged_email and last_logged_email != request.email:
+            print(f"Mudança de conta detectada: {last_logged_email} -> {request.email}")
+            if global_driver:
+                try:
+                    global_driver.quit()
+                except:
+                    pass
+                global_driver = None
+            driver_logged_in = False
+        
         driver, already_open = get_or_create_driver(headless=request.headless)
         wait = WebDriverWait(driver, 20)
         screenshots_dir = os.path.join(os.path.dirname(__file__), "screenshots")
         os.makedirs(screenshots_dir, exist_ok=True)
         
-        # 1. LOGIN - Pular se já estiver logado
+        # 1. LOGIN - Pular se já estiver logado com a mesma conta
         need_login = True
         
         # Verificar se já está logado (URL não contém "login")
-        if already_open and driver_logged_in:
+        if already_open and driver_logged_in and last_logged_email == request.email:
             try:
                 current = driver.current_url.lower()
                 if "login" not in current:
                     need_login = False
-                    print("Já está logado, pulando login...")
+                    print(f"Já está logado como {request.email}, pulando login...")
             except:
                 pass
         
@@ -313,7 +332,8 @@ async def atualizar_dinamica(request: DinamicaRequest):
                             )
                         
                         driver_logged_in = True
-                        print("Login realizado com sucesso!")
+                        last_logged_email = request.email
+                        print(f"Login realizado com sucesso como {request.email}!")
         
         # 2. NAVEGAR DIRETAMENTE PARA A URL DE TARIFAS DINÂMICAS
         driver.get("https://cloud.taximachine.com.br/tarifaCategoria/dinamica")
@@ -581,69 +601,146 @@ async def atualizar_dinamica(request: DinamicaRequest):
         """)
         time.sleep(1)
         
-        # Encontrar e clicar no toggle do card "Geral manual"
-        toggle_result = driver.execute_script("""
-            // Procurar o card "Geral manual"
-            var allElements = document.querySelectorAll('*');
-            var targetCard = null;
-            
-            for (var i = 0; i < allElements.length; i++) {
-                var el = allElements[i];
-                var text = el.innerText || '';
-                var rect = el.getBoundingClientRect();
+        # FECHAR MODAL SE ESTIVER ABERTO (modal "Dinâmica automática")
+        driver.execute_script("""
+            // Fechar qualquer modal aberto
+            var closeButtons = document.querySelectorAll('button[aria-label="Close"], .close, [data-dismiss="modal"], button');
+            for (var i = 0; i < closeButtons.length; i++) {
+                var btn = closeButtons[i];
+                var text = btn.innerText || '';
+                var ariaLabel = btn.getAttribute('aria-label') || '';
                 
-                if (text.includes('Geral manual') && text.includes('Motoristas') && 
-                    rect.width > 100 && rect.width < 300 && rect.height > 50 && rect.height < 200) {
-                    targetCard = el;
+                // Procurar X de fechar ou botão com ×
+                if (text === '×' || text === 'x' || text === 'X' || ariaLabel.toLowerCase().includes('close')) {
+                    btn.click();
+                    console.log('Modal fechado');
                     break;
                 }
             }
             
-            if (!targetCard) return 'card_not_found';
+            // Também tentar clicar fora do modal
+            var modals = document.querySelectorAll('.modal-backdrop, .modal');
+            modals.forEach(function(m) {
+                if (m.classList.contains('modal-backdrop')) {
+                    m.click();
+                }
+            });
+        """)
+        time.sleep(0.5)
+        
+        # Encontrar e clicar no toggle do card "Geral manual"
+        # O toggle está ao lado do texto "Dinâmica" dentro do card
+        toggle_result = driver.execute_script("""
+            console.log('=== BUSCANDO TOGGLE GERAL MANUAL ===');
             
-            // Procurar toggle dentro do card - pode ser input, button, ou div com role switch
-            var toggleCandidates = targetCard.querySelectorAll('input[type="checkbox"], button, [role="switch"], label');
+            // Procurar o card "Geral manual"
+            var allDivs = document.querySelectorAll('div');
+            var targetCard = null;
             
-            for (var j = 0; j < toggleCandidates.length; j++) {
-                var toggle = toggleCandidates[j];
-                var rect = toggle.getBoundingClientRect();
+            for (var i = 0; i < allDivs.length; i++) {
+                var div = allDivs[i];
+                var text = div.innerText || '';
+                var rect = div.getBoundingClientRect();
                 
-                // Toggle geralmente é pequeno (20-60px largura)
-                if (rect.width >= 20 && rect.width <= 80 && rect.height >= 10 && rect.height <= 50) {
-                    // Verificar se já está ativo
-                    var isChecked = toggle.checked === true;
-                    var ariaChecked = toggle.getAttribute('aria-checked') === 'true';
-                    var hasActiveClass = (toggle.className || '').match(/active|on|checked/i);
-                    
-                    // Verificar cor de fundo (tons de azul/verde = ativo)
-                    var style = window.getComputedStyle(toggle);
-                    var bg = style.backgroundColor;
-                    var isBlueGreen = bg.match(/rgb\\((?:59|37|34|16|22|21|20|14|13|79|99|130|197|185|163|128)/);
-                    
-                    if (isChecked || ariaChecked || hasActiveClass || isBlueGreen) {
-                        return 'already_active';
-                    }
-                    
-                    // Clicar para ativar
-                    toggle.click();
-                    return 'activated: ' + toggle.tagName;
+                // Card deve conter "Geral manual" e "Motoristas"
+                if (text.includes('Geral manual') && text.includes('Motoristas') && 
+                    rect.width > 100 && rect.width < 300 && 
+                    rect.height > 60 && rect.height < 200) {
+                    targetCard = div;
+                    console.log('Card Geral manual encontrado:', rect.width, 'x', rect.height);
+                    break;
                 }
             }
             
-            // Fallback: procurar qualquer elemento clicável no topo do card
-            var cardRect = targetCard.getBoundingClientRect();
-            var clickables = targetCard.querySelectorAll('*');
+            if (!targetCard) {
+                return 'card_geral_manual_not_found';
+            }
             
-            for (var k = 0; k < clickables.length; k++) {
-                var el = clickables[k];
-                var elRect = el.getBoundingClientRect();
-                
-                // Elemento no topo do card, lado direito
-                if (elRect.top < cardRect.top + 40 && elRect.left > cardRect.left + cardRect.width * 0.5) {
-                    if (elRect.width >= 20 && elRect.width <= 80) {
-                        el.click();
-                        return 'activated_fallback: ' + el.tagName;
+            // Procurar o toggle - geralmente é um elemento com classe contendo "switch" ou "toggle"
+            // ou um input checkbox, ou um botão pequeno
+            var toggleFound = false;
+            
+            // Estratégia 1: Procurar por classe que contenha switch/toggle
+            var switchElements = targetCard.querySelectorAll('[class*="switch"], [class*="Switch"], [class*="toggle"], [class*="Toggle"]');
+            console.log('Elementos switch/toggle encontrados:', switchElements.length);
+            
+            for (var j = 0; j < switchElements.length; j++) {
+                var sw = switchElements[j];
+                var rect = sw.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    sw.click();
+                    console.log('Clicou em switch:', sw.className);
+                    return 'clicked_switch_class: ' + sw.className;
+                }
+            }
+            
+            // Estratégia 2: Procurar input checkbox
+            var checkboxes = targetCard.querySelectorAll('input[type="checkbox"]');
+            console.log('Checkboxes encontrados:', checkboxes.length);
+            
+            for (var k = 0; k < checkboxes.length; k++) {
+                var cb = checkboxes[k];
+                cb.click();
+                console.log('Clicou em checkbox');
+                return 'clicked_checkbox';
+            }
+            
+            // Estratégia 3: Procurar elemento com role="switch"
+            var roleSwitches = targetCard.querySelectorAll('[role="switch"]');
+            if (roleSwitches.length > 0) {
+                roleSwitches[0].click();
+                return 'clicked_role_switch';
+            }
+            
+            // Estratégia 4: Procurar por elemento pequeno e arredondado (típico de toggle)
+            // que esteja próximo ao texto "Dinâmica"
+            var allElements = targetCard.querySelectorAll('*');
+            var dinamicaElement = null;
+            
+            for (var l = 0; l < allElements.length; l++) {
+                var el = allElements[l];
+                if ((el.innerText || '').trim() === 'Dinâmica' || (el.innerText || '').includes('Dinâmica')) {
+                    dinamicaElement = el;
+                    break;
+                }
+            }
+            
+            if (dinamicaElement) {
+                // Procurar elementos próximos ao "Dinâmica"
+                var parent = dinamicaElement.parentElement;
+                if (parent) {
+                    var siblings = parent.querySelectorAll('*');
+                    for (var m = 0; m < siblings.length; m++) {
+                        var sib = siblings[m];
+                        var rect = sib.getBoundingClientRect();
+                        var tag = sib.tagName.toLowerCase();
+                        
+                        // Toggle é geralmente pequeno (30-60px largura)
+                        if (rect.width >= 25 && rect.width <= 70 && rect.height >= 10 && rect.height <= 35) {
+                            if (tag !== 'span' || sib.querySelector('*')) {
+                                sib.click();
+                                console.log('Clicou em elemento próximo a Dinâmica:', tag, rect.width, 'x', rect.height);
+                                return 'clicked_near_dinamica: ' + tag;
+                            }
+                        }
                     }
+                }
+            }
+            
+            // Estratégia 5: Clicar em qualquer elemento que pareça um círculo/botão pequeno
+            for (var n = 0; n < allElements.length; n++) {
+                var el = allElements[n];
+                var rect = el.getBoundingClientRect();
+                var style = window.getComputedStyle(el);
+                var borderRadius = style.borderRadius;
+                
+                // Elemento pequeno e arredondado
+                if (rect.width >= 15 && rect.width <= 50 && 
+                    rect.height >= 15 && rect.height <= 30 &&
+                    (borderRadius.includes('50%') || parseInt(borderRadius) > 5)) {
+                    el.click();
+                    console.log('Clicou em elemento arredondado:', el.tagName, rect.width, 'x', rect.height);
+                    return 'clicked_rounded_element';
                 }
             }
             
