@@ -61,8 +61,6 @@ def create_driver(headless: bool = True):
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-software-rasterizer")
     
     # Usar Chromium se disponível (para Docker)
     chrome_bin = os.environ.get('CHROME_BIN')
@@ -79,10 +77,6 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "healthy", "service": "automation-api"}
-
-@app.get("/healthcheck")
-async def health_check():
-    return {"status": "healthy"}
 
 @app.post("/login", response_model=LoginResponse)
 async def login_taximachine(credentials: LoginCredentials):
@@ -298,19 +292,9 @@ async def atualizar_dinamica(request: DinamicaRequest):
                                 continue
                         
                         if login_button:
-                            driver.execute_script("arguments[0].click();", login_button)
+                            login_button.click()
                         else:
-                            # Fallback: usar JavaScript para encontrar e clicar no botão
-                            driver.execute_script("""
-                                var btns = document.querySelectorAll('button');
-                                for (var i = 0; i < btns.length; i++) {
-                                    var txt = btns[i].innerText || '';
-                                    if (txt.includes('Entrar') || txt.includes('Login') || btns[i].type === 'submit') {
-                                        btns[i].click();
-                                        break;
-                                    }
-                                }
-                            """)
+                            password_field.submit()
                         
                         time.sleep(2)
                         
@@ -515,13 +499,16 @@ async def atualizar_dinamica(request: DinamicaRequest):
         """)
         
         if mult_input:
-            # Limpar o campo e preencher com novo valor
+            # Limpar o campo usando JavaScript e preencher
             driver.execute_script("""
                 var input = arguments[0];
+                var value = arguments[1];
                 input.focus();
                 input.select();
-                input.value = '';
-            """, mult_input)
+                // Limpar usando execCommand
+                document.execCommand('selectAll', false, null);
+                document.execCommand('delete', false, null);
+            """, mult_input, str(request.multiplicador))
             time.sleep(0.1)
             
             # Digitar o novo valor usando send_keys
