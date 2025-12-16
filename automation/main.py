@@ -298,9 +298,19 @@ async def atualizar_dinamica(request: DinamicaRequest):
                                 continue
                         
                         if login_button:
-                            login_button.click()
+                            driver.execute_script("arguments[0].click();", login_button)
                         else:
-                            password_field.submit()
+                            # Fallback: usar JavaScript para encontrar e clicar no botão
+                            driver.execute_script("""
+                                var btns = document.querySelectorAll('button');
+                                for (var i = 0; i < btns.length; i++) {
+                                    var txt = btns[i].innerText || '';
+                                    if (txt.includes('Entrar') || txt.includes('Login') || btns[i].type === 'submit') {
+                                        btns[i].click();
+                                        break;
+                                    }
+                                }
+                            """)
                         
                         time.sleep(2)
                         
