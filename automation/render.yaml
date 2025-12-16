@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: taximachine-automation
+    env: docker
+    dockerfilePath: ./Dockerfile
+    region: oregon
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: CHROME_BIN
+        value: /usr/bin/chromium

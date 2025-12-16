@@ -1,0 +1,228 @@
+# Cole este conteúdo na aba "Dockerfile" do EasyPanel
+FROM python:3.11-slim-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium \
+    chromium-driver \
+    curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Criar requirements.txt inline
+RUN echo "fastapi==0.104.1\nuvicorn==0.24.0\nselenium==4.15.2\npython-dotenv==1.0.0\npydantic==2.5.2" > requirements.txt \
+    && pip install --no-cache-dir -r requirements.txt
+
+# Criar main.py inline (versão simplificada para teste)
+RUN cat > main.py << 'ENDOFFILE'
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
+import time
+import os
+
+app = FastAPI(title="TaxiMachine Automation API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class DinamicaRequest(BaseModel):
+    multiplicador: float
+    headless: bool = True
+    email: str = "reinaldo@painel.com.br"
+    password: str = "Reinaldo@ubizcar10"
+
+class DinamicaResponse(BaseModel):
+    success: bool
+    message: str
+    multiplicador_aplicado: Optional[float] = None
+
+def create_driver(headless=True):
+    chrome_options = Options()
+    if headless:
+        chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_bin = os.environ.get('CHROME_BIN')
+    if chrome_bin:
+        chrome_options.binary_location = chrome_bin
+    return webdriver.Chrome(options=chrome_options)
+
+@app.get("/")
+async def root():
+    return {"message": "TaxiMachine Automation API", "version": "1.0.0"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+@app.post("/dinamica/atualizar", response_model=DinamicaResponse)
+async def atualizar_dinamica(request: DinamicaRequest):
+    driver = None
+    try:
+        driver = create_driver(headless=request.headless)
+        wait = WebDriverWait(driver, 20)
+        
+        # Login
+        driver.get("https://cloud.taximachine.com.br/site/login")
+        time.sleep(2)
+        
+        email_field = wait.until(EC.presence_of_element_located((By.NAME, "LoginForm[username]")))
+        email_field.send_keys(request.email)
+        
+        password_field = driver.find_element(By.NAME, "LoginForm[password]")
+        password_field.send_keys(request.password)
+        
+        login_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
+        login_btn.click()
+        time.sleep(2)
+        
+        # Navegar para dinamicas
+        driver.get("https://cloud.taximachine.com.br/tarifaCategoria/dinamica")
+        time.sleep(2)
+        
+        # Fechar modal
+        driver.execute_script("""
+            document.querySelectorAll('[class*="modal"], [class*="backdrop"]').forEach(el => el.remove());
+        """)
+        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+        time.sleep(0.5)
+        
+        # Clicar em Manuais
+        driver.execute_script("""
+            document.querySelectorAll('*').forEach(el => {
+                if (el.innerText && el.innerText.trim() === 'Manuais') el.click();
+            });
+        """)
+        time.sleep(1)
+        
+        # Encontrar card e clicar nos 3 pontos
+        driver.execute_script("""
+            var cards = document.querySelectorAll('*');
+            for (var i = 0; i < cards.length; i++) {
+                var el = cards[i];
+                var text = el.innerText || '';
+                if (text.includes('Geral manual') && text.includes('Motoristas')) {
+                    var rect = el.getBoundingClientRect();
+                    if (rect.width > 100 && rect.width < 250) {
+                        var svgs = el.querySelectorAll('svg');
+                        if (svgs.length > 0) {
+                            var parent = svgs[svgs.length-1].closest('button') || svgs[svgs.length-1].parentElement;
+                            parent.click();
+                        }
+                        break;
+                    }
+                }
+            }
+        """)
+        time.sleep(0.5)
+        
+        # Clicar em Editar
+        editar = driver.find_elements(By.XPATH, "//*[text()='Editar']")
+        for el in editar:
+            if el.is_displayed():
+                driver.execute_script("arguments[0].click();", el)
+                break
+        time.sleep(1.5)
+        
+        # Preencher multiplicador
+        mult_input = driver.execute_script("""
+            var inputs = document.querySelectorAll('input');
+            var visible = [];
+            for (var i = 0; i < inputs.length; i++) {
+                var rect = inputs[i].getBoundingClientRect();
+                if (rect.width > 0 && inputs[i].type !== 'hidden') visible.push(inputs[i]);
+            }
+            return visible.length >= 2 ? visible[1] : visible[0];
+        """)
+        
+        if mult_input:
+            driver.execute_script("arguments[0].focus(); arguments[0].select();", mult_input)
+            mult_input.send_keys(Keys.CONTROL + "a")
+            mult_input.send_keys(str(request.multiplicador))
+        
+        time.sleep(0.5)
+        
+        # Salvar
+        driver.execute_script("""
+            document.querySelectorAll('button').forEach(btn => {
+                if (btn.innerText && btn.innerText.includes('Salvar')) btn.click();
+            });
+        """)
+        time.sleep(2)
+        
+        # Ativar toggle
+        driver.get("https://cloud.taximachine.com.br/tarifaCategoria/dinamica")
+        time.sleep(1)
+        driver.execute_script("""
+            document.querySelectorAll('*').forEach(el => {
+                if (el.innerText && el.innerText.trim() === 'Manuais') el.click();
+            });
+        """)
+        time.sleep(1)
+        
+        driver.execute_script("""
+            var cards = document.querySelectorAll('*');
+            for (var i = 0; i < cards.length; i++) {
+                var el = cards[i];
+                var text = el.innerText || '';
+                if (text.includes('Geral manual') && text.includes('Motoristas')) {
+                    var rect = el.getBoundingClientRect();
+                    if (rect.width > 100 && rect.width < 250) {
+                        var toggles = el.querySelectorAll('input[type="checkbox"], [class*="toggle"], [class*="switch"]');
+                        for (var j = 0; j < toggles.length; j++) {
+                            var t = toggles[j];
+                            if (!t.checked) {
+                                var parent = t.closest('label') || t.parentElement;
+                                parent.click();
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        """)
+        
+        return DinamicaResponse(
+            success=True,
+            message=f"Dinamica atualizada: {request.multiplicador}x",
+            multiplicador_aplicado=request.multiplicador
+        )
+        
+    except Exception as e:
+        return DinamicaResponse(success=False, message=str(e))
+    finally:
+        if driver:
+            driver.quit()
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    print(f"Iniciando na porta {port}...")
+    uvicorn.run(app, host="0.0.0.0", port=port)
+ENDOFFILE
+
+RUN mkdir -p screenshots
+
+ENV CHROME_BIN=/usr/bin/chromium
+ENV PORT=8000
+
+EXPOSE 8000
+
+CMD ["python", "main.py"]
