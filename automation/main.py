@@ -583,91 +583,70 @@ async def atualizar_dinamica(request: DinamicaRequest):
         
         # Encontrar e clicar no toggle do card "Geral manual"
         toggle_result = driver.execute_script("""
-            // Procurar todos os cards
-            var cards = document.querySelectorAll('div, article');
+            // Procurar o card "Geral manual"
+            var allElements = document.querySelectorAll('*');
+            var targetCard = null;
             
-            for (var i = 0; i < cards.length; i++) {
-                var card = cards[i];
-                var text = card.innerText || '';
-                var rect = card.getBoundingClientRect();
+            for (var i = 0; i < allElements.length; i++) {
+                var el = allElements[i];
+                var text = el.innerText || '';
+                var rect = el.getBoundingClientRect();
                 
-                // Encontrar o card "Geral manual" pelo tamanho e conteúdo
-                if (text.includes('Geral manual') && 
-                    rect.width > 100 && rect.width < 300 && 
-                    rect.height > 50 && rect.height < 200) {
-                    
-                    // Procurar o toggle - geralmente é um input checkbox ou um elemento com classe toggle/switch
-                    var allElements = card.querySelectorAll('*');
-                    
-                    for (var j = 0; j < allElements.length; j++) {
-                        var el = allElements[j];
-                        var elRect = el.getBoundingClientRect();
-                        
-                        // O toggle está na linha do topo do card, ao lado do valor (1.2x)
-                        // Verificar se é um elemento pequeno na parte superior direita
-                        if (elRect.width > 20 && elRect.width < 60 && elRect.height > 10 && elRect.height < 40) {
-                            var tagName = el.tagName.toLowerCase();
-                            var classes = el.className || '';
-                            
-                            // Verificar se parece um toggle
-                            if (tagName === 'input' || 
-                                classes.includes('toggle') || 
-                                classes.includes('switch') ||
-                                classes.includes('slider') ||
-                                el.getAttribute('role') === 'switch') {
-                                
-                                // Verificar se está ativo
-                                var isActive = el.checked === true || 
-                                              el.getAttribute('aria-checked') === 'true' ||
-                                              classes.includes('active') ||
-                                              classes.includes('on');
-                                
-                                // Verificar cor de fundo (azul = ativo)
-                                var style = window.getComputedStyle(el);
-                                var bgColor = style.backgroundColor;
-                                if (bgColor.includes('59, 130') || bgColor.includes('37, 99') || 
-                                    bgColor.includes('34, 197') || bgColor.includes('16, 185')) {
-                                    isActive = true;
-                                }
-                                
-                                if (isActive) {
-                                    return 'already_active';
-                                }
-                                
-                                // Clicar para ativar
-                                var clickTarget = el.closest('label') || el.parentElement || el;
-                                clickTarget.click();
-                                return 'activated';
-                            }
-                        }
-                    }
-                    
-                    // Se não encontrou toggle específico, procurar qualquer elemento clicável na área do toggle
-                    // O toggle geralmente está entre o ícone de raio e o valor (1.2x)
-                    var headerElements = card.querySelectorAll('label, button, input, [class*="toggle"], [class*="switch"]');
-                    for (var k = 0; k < headerElements.length; k++) {
-                        var hEl = headerElements[k];
-                        var hRect = hEl.getBoundingClientRect();
-                        
-                        // Está na parte superior do card
-                        if (hRect.top < rect.top + 50) {
-                            // Verificar se não está ativo
-                            var hClasses = hEl.className || '';
-                            var hIsActive = hEl.checked === true || 
-                                           hClasses.includes('active') || 
-                                           hClasses.includes('on');
-                            
-                            if (!hIsActive) {
-                                hEl.click();
-                                return 'activated_header';
-                            } else {
-                                return 'already_active_header';
-                            }
-                        }
-                    }
+                if (text.includes('Geral manual') && text.includes('Motoristas') && 
+                    rect.width > 100 && rect.width < 300 && rect.height > 50 && rect.height < 200) {
+                    targetCard = el;
                     break;
                 }
             }
+            
+            if (!targetCard) return 'card_not_found';
+            
+            // Procurar toggle dentro do card - pode ser input, button, ou div com role switch
+            var toggleCandidates = targetCard.querySelectorAll('input[type="checkbox"], button, [role="switch"], label');
+            
+            for (var j = 0; j < toggleCandidates.length; j++) {
+                var toggle = toggleCandidates[j];
+                var rect = toggle.getBoundingClientRect();
+                
+                // Toggle geralmente é pequeno (20-60px largura)
+                if (rect.width >= 20 && rect.width <= 80 && rect.height >= 10 && rect.height <= 50) {
+                    // Verificar se já está ativo
+                    var isChecked = toggle.checked === true;
+                    var ariaChecked = toggle.getAttribute('aria-checked') === 'true';
+                    var hasActiveClass = (toggle.className || '').match(/active|on|checked/i);
+                    
+                    // Verificar cor de fundo (tons de azul/verde = ativo)
+                    var style = window.getComputedStyle(toggle);
+                    var bg = style.backgroundColor;
+                    var isBlueGreen = bg.match(/rgb\\((?:59|37|34|16|22|21|20|14|13|79|99|130|197|185|163|128)/);
+                    
+                    if (isChecked || ariaChecked || hasActiveClass || isBlueGreen) {
+                        return 'already_active';
+                    }
+                    
+                    // Clicar para ativar
+                    toggle.click();
+                    return 'activated: ' + toggle.tagName;
+                }
+            }
+            
+            // Fallback: procurar qualquer elemento clicável no topo do card
+            var cardRect = targetCard.getBoundingClientRect();
+            var clickables = targetCard.querySelectorAll('*');
+            
+            for (var k = 0; k < clickables.length; k++) {
+                var el = clickables[k];
+                var elRect = el.getBoundingClientRect();
+                
+                // Elemento no topo do card, lado direito
+                if (elRect.top < cardRect.top + 40 && elRect.left > cardRect.left + cardRect.width * 0.5) {
+                    if (elRect.width >= 20 && elRect.width <= 80) {
+                        el.click();
+                        return 'activated_fallback: ' + el.tagName;
+                    }
+                }
+            }
+            
             return 'toggle_not_found';
         """)
         
