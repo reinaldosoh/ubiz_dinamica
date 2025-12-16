@@ -26,37 +26,41 @@ interface DinamicaResponse {
 }
 
 export const useAutomation = () => {
-  const AUTOMATION_API_URL = 'http://localhost:8000'
+  const DEFAULT_API_URL = 'http://localhost:8000'
 
-  const login = async (credentials?: LoginCredentials): Promise<LoginResponse> => {
-    const response = await $fetch<LoginResponse>(`${AUTOMATION_API_URL}/login`, {
+  const login = async (credentials?: LoginCredentials, apiUrl?: string): Promise<LoginResponse> => {
+    const baseUrl = apiUrl || DEFAULT_API_URL
+    const response = await $fetch<LoginResponse>(`${baseUrl}/login`, {
       method: 'POST',
       body: credentials || {}
     })
     return response
   }
 
-  const loginTest = async (): Promise<LoginResponse> => {
-    const response = await $fetch<LoginResponse>(`${AUTOMATION_API_URL}/login/test`, {
+  const loginTest = async (apiUrl?: string): Promise<LoginResponse> => {
+    const baseUrl = apiUrl || DEFAULT_API_URL
+    const response = await $fetch<LoginResponse>(`${baseUrl}/login/test`, {
       method: 'POST'
     })
     return response
   }
 
-  const loginVisual = async (): Promise<LoginResponse> => {
-    const response = await $fetch<LoginResponse>(`${AUTOMATION_API_URL}/login/visual`, {
+  const loginVisual = async (apiUrl?: string): Promise<LoginResponse> => {
+    const baseUrl = apiUrl || DEFAULT_API_URL
+    const response = await $fetch<LoginResponse>(`${baseUrl}/login/visual`, {
       method: 'POST'
     })
     return response
   }
 
-  const healthCheck = async (): Promise<{ status: string }> => {
-    const response = await $fetch<{ status: string }>(`${AUTOMATION_API_URL}/health`)
+  const healthCheck = async (apiUrl?: string): Promise<{ status: string }> => {
+    const baseUrl = apiUrl || DEFAULT_API_URL
+    const response = await $fetch<{ status: string }>(`${baseUrl}/health`)
     return response
   }
 
   const atualizarDinamica = async (request: DinamicaRequest): Promise<DinamicaResponse> => {
-    const baseUrl = request.apiUrl || AUTOMATION_API_URL
+    const baseUrl = request.apiUrl || DEFAULT_API_URL
     const { apiUrl, ...body } = request
     const response = await $fetch<DinamicaResponse>(`${baseUrl}/dinamica/atualizar`, {
       method: 'POST',

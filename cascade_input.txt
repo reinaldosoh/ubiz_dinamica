@@ -1,3 +1,1 @@
-/automation
-
-mude automation aqui para eu conseguir escolher a cidade de teste
+fui rodar o /automation para curvelo ele ficou executando e nao aconteceu nada no modo visual

@@ -361,7 +361,7 @@ const apiUrl = computed(() => {
 const checkHealth = async () => {
   checkingHealth.value = true
   try {
-    await healthCheck()
+    await healthCheck(apiUrl.value)
     apiStatus.value = 'online'
   } catch (e) {
     apiStatus.value = 'offline'
@@ -378,9 +378,9 @@ const executeLogin = async (mode: 'headless' | 'visual') => {
   
   try {
     if (mode === 'headless') {
-      result.value = await loginTest()
+      result.value = await loginTest(apiUrl.value)
     } else {
-      result.value = await loginVisual()
+      result.value = await loginVisual(apiUrl.value)
     }
   } catch (e: any) {
     error.value = e.message || 'Erro ao conectar com a API de automação. Verifique se o servidor Python está rodando.'
@@ -418,8 +418,14 @@ const executarDinamica = async (headless: boolean) => {
   }
 }
 
+// Re-verificar health quando cidade mudar
+watch(cidadeSelecionada, () => {
+  if (cidadeSelecionada.value) {
+    checkHealth()
+  }
+})
+
 onMounted(() => {
   fetchCidades()
-  checkHealth()
 })
 </script>
