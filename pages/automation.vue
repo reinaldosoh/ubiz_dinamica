@@ -57,9 +57,17 @@
             </div>
             <div>
               <p class="text-text-tertiary text-sm">Servidor</p>
-              <p class="text-xl font-bold text-blue-400">localhost:8000</p>
+              <p class="text-xl font-bold text-blue-400">{{ usarApiLocal ? 'localhost:8000' : 'Render' }}</p>
             </div>
           </div>
+          <label class="flex items-center gap-2 mt-3 cursor-pointer">
+            <input 
+              type="checkbox" 
+              v-model="usarApiLocal"
+              class="w-4 h-4 rounded border-border-secondary bg-bg-tertiary text-primary focus:ring-primary"
+            />
+            <span class="text-sm text-text-secondary">Usar API Local (modo visual)</span>
+          </label>
         </div>
 
         <div class="card">
@@ -318,6 +326,7 @@ interface Cidade {
 const cidades = ref<Cidade[]>([])
 const cidadeSelecionada = ref<Cidade | null>(null)
 const loadingCidades = ref(true)
+const usarApiLocal = ref(true) // Toggle para usar API local ou remota
 
 const apiStatus = ref<'online' | 'offline'>('offline')
 const loading = ref(false)
@@ -353,8 +362,11 @@ async function fetchCidades() {
   }
 }
 
-// URL da API baseada na cidade selecionada
+// URL da API baseada na cidade selecionada ou local
 const apiUrl = computed(() => {
+  if (usarApiLocal.value) {
+    return 'http://localhost:8000'
+  }
   return cidadeSelecionada.value?.automation_url || 'http://localhost:8000'
 })
 
@@ -418,8 +430,8 @@ const executarDinamica = async (headless: boolean) => {
   }
 }
 
-// Re-verificar health quando cidade mudar
-watch(cidadeSelecionada, () => {
+// Re-verificar health quando cidade ou toggle mudar
+watch([cidadeSelecionada, usarApiLocal], () => {
   if (cidadeSelecionada.value) {
     checkHealth()
   }
