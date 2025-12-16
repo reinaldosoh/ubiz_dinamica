@@ -75,6 +75,62 @@
         </div>
       </div>
 
+      <!-- Seletor de Cidade -->
+      <div class="card mb-8">
+        <h2 class="card-title mb-4">Selecionar Cidade</h2>
+        
+        <div v-if="loadingCidades" class="flex items-center gap-2 text-text-tertiary">
+          <Loader2 class="w-4 h-4 animate-spin" />
+          Carregando cidades...
+        </div>
+        
+        <div v-else class="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <button
+            v-for="cidade in cidades"
+            :key="cidade.id"
+            @click="cidadeSelecionada = cidade"
+            class="p-4 rounded-lg border transition-all text-left"
+            :class="cidadeSelecionada?.id === cidade.id 
+              ? 'bg-primary/10 border-primary text-primary' 
+              : 'bg-bg-tertiary border-border-secondary hover:border-primary/50 text-text-primary'"
+          >
+            <div class="flex items-center gap-2 mb-1">
+              <MapPin class="w-4 h-4" />
+              <span class="font-medium">{{ cidade.nome }}</span>
+            </div>
+            <div class="flex items-center gap-2 text-xs">
+              <span 
+                class="px-1.5 py-0.5 rounded"
+                :class="cidade.automation_ativo && cidade.automation_email 
+                  ? 'bg-green-400/20 text-green-400' 
+                  : 'bg-yellow-400/20 text-yellow-400'"
+              >
+                {{ cidade.automation_ativo && cidade.automation_email ? 'Configurada' : 'Pendente' }}
+              </span>
+            </div>
+          </button>
+        </div>
+
+        <div v-if="cidadeSelecionada && !cidadeSelecionada.automation_email" class="mt-4 bg-yellow-400/10 rounded-lg p-4 flex items-start gap-3">
+          <AlertTriangle class="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+          <div>
+            <p class="text-yellow-400 font-medium">Credenciais não configuradas</p>
+            <p class="text-text-tertiary text-sm mt-1">
+              Configure as credenciais de automação na página de <NuxtLink to="/cidades" class="text-primary underline">Cidades</NuxtLink>.
+            </p>
+          </div>
+        </div>
+
+        <div v-if="cidadeSelecionada && cidadeSelecionada.automation_email" class="mt-4 bg-bg-tertiary rounded-lg p-4">
+          <p class="text-text-tertiary text-sm">
+            <strong class="text-text-primary">Email:</strong> {{ cidadeSelecionada.automation_email }}
+          </p>
+          <p class="text-text-tertiary text-sm mt-1">
+            <strong class="text-text-primary">API:</strong> {{ cidadeSelecionada.automation_url || 'localhost:8000' }}
+          </p>
+        </div>
+      </div>
+
       <!-- Atualizar Dinâmica -->
       <div class="card mb-8">
         <h2 class="card-title mb-6">Atualizar Dinâmica TaxiMachine</h2>
@@ -242,10 +298,26 @@ import {
   CheckCircle, 
   XCircle,
   AlertTriangle,
-  Play
+  Play,
+  MapPin
 } from 'lucide-vue-next'
 
+const { $supabase } = useNuxtApp()
+const supabase = $supabase
 const { loginTest, loginVisual, healthCheck, atualizarDinamica } = useAutomation()
+
+interface Cidade {
+  id: string
+  nome: string
+  automation_email: string | null
+  automation_password: string | null
+  automation_url: string | null
+  automation_ativo: boolean
+}
+
+const cidades = ref<Cidade[]>([])
+const cidadeSelecionada = ref<Cidade | null>(null)
+const loadingCidades = ref(true)
 
 const apiStatus = ref<'online' | 'offline'>('offline')
 const loading = ref(false)
@@ -254,6 +326,37 @@ const checkingHealth = ref(false)
 const result = ref<{ success: boolean; message: string; screenshot_path: string | null; multiplicador_aplicado?: number | null } | null>(null)
 const error = ref<string | null>(null)
 const multiplicador = ref<number>(1.3)
+
+// Buscar cidades com automação configurada
+async function fetchCidades() {
+  loadingCidades.value = true
+  try {
+    const { data, error: err } = await supabase
+      .from('cidades')
+      .select('id, nome, automation_email, automation_password, automation_url, automation_ativo')
+      .order('nome')
+    
+    if (err) throw err
+    cidades.value = data || []
+    
+    // Selecionar primeira cidade com automação ativa
+    const cidadeAtiva = cidades.value.find(c => c.automation_ativo && c.automation_email)
+    if (cidadeAtiva) {
+      cidadeSelecionada.value = cidadeAtiva
+    } else if (cidades.value.length > 0) {
+      cidadeSelecionada.value = cidades.value[0]
+    }
+  } catch (e) {
+    console.error('Erro ao buscar cidades:', e)
+  } finally {
+    loadingCidades.value = false
+  }
+}
+
+// URL da API baseada na cidade selecionada
+const apiUrl = computed(() => {
+  return cidadeSelecionada.value?.automation_url || 'http://localhost:8000'
+})
 
 const checkHealth = async () => {
   checkingHealth.value = true
@@ -289,6 +392,10 @@ const executeLogin = async (mode: 'headless' | 'visual') => {
 
 const executarDinamica = async (headless: boolean) => {
   if (!multiplicador.value) return
+  if (!cidadeSelecionada.value) {
+    error.value = 'Selecione uma cidade primeiro'
+    return
+  }
   
   loading.value = true
   loadingMode.value = headless ? 'dinamica-headless' : 'dinamica-visual'
@@ -298,7 +405,10 @@ const executarDinamica = async (headless: boolean) => {
   try {
     result.value = await atualizarDinamica({
       multiplicador: multiplicador.value,
-      headless
+      headless,
+      email: cidadeSelecionada.value.automation_email || undefined,
+      password: cidadeSelecionada.value.automation_password || undefined,
+      apiUrl: apiUrl.value
     })
   } catch (e: any) {
     error.value = e.message || 'Erro ao executar automação de dinâmica. Verifique se o servidor Python está rodando.'
@@ -309,6 +419,7 @@ const executarDinamica = async (headless: boolean) => {
 }
 
 onMounted(() => {
+  fetchCidades()
   checkHealth()
 })
 </script>

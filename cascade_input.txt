@@ -1,1 +1,3 @@
-MAS AONDE EU COLOCO ESSAS CREDENCIAIS VIA FRONT?
+/automation
+
+mude automation aqui para eu conseguir escolher a cidade de teste

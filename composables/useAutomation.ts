@@ -15,6 +15,7 @@ interface DinamicaRequest {
   headless?: boolean
   email?: string
   password?: string
+  apiUrl?: string
 }
 
 interface DinamicaResponse {
@@ -55,9 +56,11 @@ export const useAutomation = () => {
   }
 
   const atualizarDinamica = async (request: DinamicaRequest): Promise<DinamicaResponse> => {
-    const response = await $fetch<DinamicaResponse>(`${AUTOMATION_API_URL}/dinamica/atualizar`, {
+    const baseUrl = request.apiUrl || AUTOMATION_API_URL
+    const { apiUrl, ...body } = request
+    const response = await $fetch<DinamicaResponse>(`${baseUrl}/dinamica/atualizar`, {
       method: 'POST',
-      body: request
+      body
     })
     return response
   }
