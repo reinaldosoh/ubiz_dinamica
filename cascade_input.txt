@@ -1,1 +1,7 @@
-PERFEITO AGORA É QUE VEM O DESAFIO, MAS POR HORA FAÇA UM COMMITE PARA SALVARMOS ESSE PONTO DO PROJETO 
+temos as seguintes opcoes no easypanel:
+
+1 - 1.png
+2 - 2.png
+3 - 3.png
+
+dentro da pasta PRINT

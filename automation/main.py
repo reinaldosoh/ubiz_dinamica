@@ -66,9 +66,13 @@ def create_driver(headless: bool = True):
 
 @app.get("/")
 async def root():
-    return {"status": "online", "message": "TaxiMachine Automation API"}
+    return {"message": "TaxiMachine Automation API", "version": "1.0.0"}
 
 @app.get("/health")
+async def health():
+    return {"status": "healthy", "service": "automation-api"}
+
+@app.get("/healthcheck")
 async def health_check():
     return {"status": "healthy"}
 
