@@ -52,7 +52,8 @@ class DinamicaResponse(BaseModel):
     screenshot_path: Optional[str] = None
 
 def create_driver(headless: bool = True):
-    """Cria e configura o driver do Chrome"""
+    """Cria e configura o driver do Chrome/Chromium"""
+    import os
     chrome_options = Options()
     if headless:
         chrome_options.add_argument("--headless=new")
@@ -60,6 +61,13 @@ def create_driver(headless: bool = True):
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-software-rasterizer")
+    
+    # Usar Chromium se disponível (para Docker)
+    chrome_bin = os.environ.get('CHROME_BIN')
+    if chrome_bin:
+        chrome_options.binary_location = chrome_bin
     
     driver = webdriver.Chrome(options=chrome_options)
     return driver
