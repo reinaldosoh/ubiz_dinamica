@@ -1,12 +1,1 @@
-Iniciando servidor na porta 10000...
-INFO:     127.0.0.1:50544 - "HEAD / HTTP/1.1" 405 Method Not Allowed
-==> Your service is live 🎉
-==> 
-==> ///////////////////////////////////////////////////////////
-==> 
-==> Available at your primary URL https://ubiz-dinamica.onrender.com
-==> 
-==> ///////////////////////////////////////////////////////////
-INFO:     10.19.131.84:0 - "GET / HTTP/1.1" 200 OK
-INFO:     10.19.131.84:0 - "GET / HTTP/1.1" 200 OK
-INFO:     10.19.131.84:0 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+caralho teste essa porra e garanta que esta funcionando 

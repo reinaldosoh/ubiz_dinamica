@@ -515,16 +515,13 @@ async def atualizar_dinamica(request: DinamicaRequest):
         """)
         
         if mult_input:
-            # Limpar o campo usando JavaScript e preencher
+            # Limpar o campo e preencher com novo valor
             driver.execute_script("""
                 var input = arguments[0];
-                var value = arguments[1];
                 input.focus();
                 input.select();
-                // Limpar usando execCommand
-                document.execCommand('selectAll', false, null);
-                document.execCommand('delete', false, null);
-            """, mult_input, str(request.multiplicador))
+                input.value = '';
+            """, mult_input)
             time.sleep(0.1)
             
             # Digitar o novo valor usando send_keys
