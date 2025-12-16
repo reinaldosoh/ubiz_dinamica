@@ -1,1 +1,1 @@
-a automacao esta funcionando, agora em catanduvas esta 1.8 e mudou para 1.8 na machine, mas nao ativou
+MAS AONDE EU COLOCO ESSAS CREDENCIAIS VIA FRONT?

@@ -40,6 +40,12 @@ interface Cidade {
   config_dinamica: ConfigDinamica | null
   created_at: string
   updated_at: string
+  // Campos de automação
+  automation_email: string | null
+  automation_password: string | null
+  automation_url: string | null
+  automation_multiplicador_minimo: number | null
+  automation_ativo: boolean
   // Dados calculados
   total_corridas?: number
   dinamica_atual?: any
@@ -117,9 +123,16 @@ const novaCidade = ref({
 const credenciaisForm = ref({
   api_key: '',
   usuario: '',
-  senha: ''
+  senha: '',
+  // Automação
+  automation_email: '',
+  automation_password: '',
+  automation_url: 'https://ubiz-dinamica.onrender.com',
+  automation_multiplicador_minimo: 1.1,
+  automation_ativo: false
 })
 const showPassword = ref(false)
+const showAutomationPassword = ref(false)
 
 // Estados brasileiros
 const estados = [
@@ -302,7 +315,12 @@ function abrirCredenciais(cidade: Cidade) {
   credenciaisForm.value = {
     api_key: cidade.taximachine_api_key || '',
     usuario: '',
-    senha: ''
+    senha: '',
+    automation_email: cidade.automation_email || '',
+    automation_password: cidade.automation_password || '',
+    automation_url: cidade.automation_url || 'https://ubiz-dinamica.onrender.com',
+    automation_multiplicador_minimo: cidade.automation_multiplicador_minimo || 1.1,
+    automation_ativo: cidade.automation_ativo || false
   }
   showCredentialsModal.value = true
 }
@@ -371,6 +389,12 @@ async function salvarCredenciais() {
       .update({
         taximachine_api_key: credenciaisForm.value.api_key || null,
         taximachine_auth_base64: authBase64,
+        // Campos de automação
+        automation_email: credenciaisForm.value.automation_email || null,
+        automation_password: credenciaisForm.value.automation_password || null,
+        automation_url: credenciaisForm.value.automation_url || null,
+        automation_multiplicador_minimo: credenciaisForm.value.automation_multiplicador_minimo || 1.1,
+        automation_ativo: credenciaisForm.value.automation_ativo,
         updated_at: new Date().toISOString()
       })
       .eq('id', selectedCidade.value.id)
@@ -382,9 +406,15 @@ async function salvarCredenciais() {
     if (cidade) {
       cidade.taximachine_api_key = credenciaisForm.value.api_key || null
       cidade.taximachine_auth_base64 = authBase64
+      cidade.automation_email = credenciaisForm.value.automation_email || null
+      cidade.automation_password = credenciaisForm.value.automation_password || null
+      cidade.automation_url = credenciaisForm.value.automation_url || null
+      cidade.automation_multiplicador_minimo = credenciaisForm.value.automation_multiplicador_minimo
+      cidade.automation_ativo = credenciaisForm.value.automation_ativo
     }
 
     showCredentialsModal.value = false
+    alert.success('Credenciais salvas com sucesso!')
   } catch (e) {
     console.error('Erro ao salvar credenciais:', e)
     alert.error('Erro ao salvar credenciais')
@@ -867,6 +897,87 @@ onMounted(() => {
               <CheckCircle class="w-4 h-4" />
               Autenticação já configurada
             </p>
+          </div>
+
+          <!-- Seção Automação TaxiMachine -->
+          <div class="border-t border-border-secondary pt-4 mt-4">
+            <div class="flex items-center justify-between mb-3">
+              <h4 class="text-text-primary font-medium">Automação TaxiMachine</h4>
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input 
+                  type="checkbox" 
+                  v-model="credenciaisForm.automation_ativo"
+                  class="w-4 h-4 rounded border-border-secondary bg-bg-tertiary text-primary focus:ring-primary"
+                />
+                <span class="text-sm text-text-secondary">Ativar automação</span>
+              </label>
+            </div>
+            
+            <p class="text-text-tertiary text-xs mb-3">
+              Configure as credenciais para atualização automática da dinâmica no TaxiMachine Cloud.
+            </p>
+            
+            <div class="space-y-3">
+              <div>
+                <label class="block text-text-secondary text-sm mb-2">Email (login TaxiMachine)</label>
+                <input 
+                  v-model="credenciaisForm.automation_email"
+                  type="email"
+                  class="w-full bg-bg-tertiary border border-border-secondary rounded-lg px-4 py-2 text-text-primary focus:outline-none focus:border-primary"
+                  placeholder="email@taximachine.com"
+                />
+              </div>
+
+              <div>
+                <label class="block text-text-secondary text-sm mb-2">Senha (login TaxiMachine)</label>
+                <div class="relative">
+                  <input 
+                    v-model="credenciaisForm.automation_password"
+                    :type="showAutomationPassword ? 'text' : 'password'"
+                    class="w-full bg-bg-tertiary border border-border-secondary rounded-lg px-4 py-2 pr-10 text-text-primary focus:outline-none focus:border-primary"
+                    placeholder="Senha do TaxiMachine"
+                  />
+                  <button 
+                    type="button"
+                    class="absolute right-3 top-1/2 -translate-y-1/2 text-text-tertiary hover:text-text-primary"
+                    @click="showAutomationPassword = !showAutomationPassword"
+                  >
+                    <component :is="showAutomationPassword ? EyeOff : Eye" class="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label class="block text-text-secondary text-sm mb-2">Multiplicador Mínimo</label>
+                <input 
+                  v-model.number="credenciaisForm.automation_multiplicador_minimo"
+                  type="number"
+                  step="0.1"
+                  min="1.0"
+                  max="3.0"
+                  class="w-full bg-bg-tertiary border border-border-secondary rounded-lg px-4 py-2 text-text-primary focus:outline-none focus:border-primary"
+                  placeholder="1.1"
+                />
+                <p class="text-text-tertiary text-xs mt-1">Valor mínimo aceito pelo TaxiMachine (ex: 1.1)</p>
+              </div>
+
+              <div>
+                <label class="block text-text-secondary text-sm mb-2">URL da API de Automação</label>
+                <input 
+                  v-model="credenciaisForm.automation_url"
+                  type="url"
+                  class="w-full bg-bg-tertiary border border-border-secondary rounded-lg px-4 py-2 text-text-primary focus:outline-none focus:border-primary"
+                  placeholder="https://ubiz-dinamica.onrender.com"
+                />
+              </div>
+            </div>
+
+            <div v-if="credenciaisForm.automation_ativo && credenciaisForm.automation_email" class="bg-green-400/10 rounded-lg p-3 mt-3">
+              <p class="text-green-400 text-sm flex items-center gap-2">
+                <CheckCircle class="w-4 h-4" />
+                Automação configurada para {{ credenciaisForm.automation_email }}
+              </p>
+            </div>
           </div>
 
           <div class="flex gap-3 pt-4">
