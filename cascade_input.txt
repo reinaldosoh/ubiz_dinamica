@@ -1,1 +1,22 @@
-faça o commite par ao render atualizar 
+FUNCIONOU ATIVAR A DINAMICA VIA RENDER MAS 
+DEU ESSE ERRO A MENSAGEM NAO ESTA FORMATADA DO BODY 
+
+CIDADE: Não informada
+ESTADO: Não informado
+DINAMICA ALTERADA PARA: 1.1
+DIA DA ATUALIZACAO: 17/12/2025
+HORA DA ATUALIZACAO: 16:43:40
+
+
+NAO ESTA PASSANDO A CIDADE  E ESTADO 
+E A HORA ESTA INDO 3 HORAS A FRENTE 
+
+
+E QUANDO EU TENTO CRIA O WEBHOOK DE GUARATINGUETA CIDADE ID 
+adb8d7f6-ae46-4c43-8d02-33c6c36386e8 DA ERRO 400 QUANDO CLICO NO BOTAO DE CADASTRAR WEBHOOK cidades.vue:464  POST https://hqgnealfdxnkhlaahyuu.supabase.co/functions/v1/taximachine-api?action=cadastrar&cidade_id=adb8d7f6-ae46-4c43-8d02-33c6c36386e8 400 (Bad Request)
+cadastrarWebhook @ cidades.vue:464
+onClick @ cidades.vue:761
+callWithErrorHandling @ runtime-core.esm-bundler.js?v=b9b3a31c:197
+callWithAsyncErrorHandling @ runtime-core.esm-bundler.js?v=b9b3a31c:204
+invoker @ runtime-dom.esm-bundler.js?v=b9b3a31c:721
+cidades.vue:464  POST https://hqgnealfdxnkhlaahyuu.supabase.co/functions/v1/taximachine-api?action=cadastrar&cidade_id=adb8d7f6-ae46-4c43-8d02-33c6c36386e8 400 (Bad Request)

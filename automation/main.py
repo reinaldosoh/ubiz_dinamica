@@ -12,7 +12,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 import time
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -792,12 +792,18 @@ async def atualizar_dinamica(request: DinamicaRequest):
         # 8. ENVIAR NOTIFICAÇÃO PARA WEBHOOK N8N
         try:
             webhook_url = "https://n8n-webhook.api.soureino.com/webhook/1e765e17-4e6d-4b12-a2ac-533c0d981c62"
-            agora = datetime.now()
+            
+            # Usar timezone de Brasília (UTC-3)
+            tz_brasilia = timezone(timedelta(hours=-3))
+            agora = datetime.now(tz_brasilia)
             data_atual = agora.strftime("%d/%m/%Y")
             hora_atual = agora.strftime("%H:%M:%S")
             
             # Verificar se é ambiente de teste (localhost) ou produção (Render)
             is_localhost = os.environ.get('RENDER') is None
+            
+            # Log para debug
+            print(f"Webhook - Cidade: {request.cidade}, Estado: {request.estado}")
             
             mensagem = f"""CIDADE: {request.cidade}
 ESTADO: {request.estado}
