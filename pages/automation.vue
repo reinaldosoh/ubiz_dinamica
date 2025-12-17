@@ -317,6 +317,7 @@ const { loginTest, loginVisual, healthCheck, atualizarDinamica } = useAutomation
 interface Cidade {
   id: string
   nome: string
+  estado: string
   automation_email: string | null
   automation_password: string | null
   automation_url: string | null
@@ -342,7 +343,7 @@ async function fetchCidades() {
   try {
     const { data, error: err } = await supabase
       .from('cidades')
-      .select('id, nome, automation_email, automation_password, automation_url, automation_ativo')
+      .select('id, nome, estado, automation_email, automation_password, automation_url, automation_ativo')
       .order('nome')
     
     if (err) throw err
@@ -420,7 +421,9 @@ const executarDinamica = async (headless: boolean) => {
       headless,
       email: cidadeSelecionada.value.automation_email || undefined,
       password: cidadeSelecionada.value.automation_password || undefined,
-      apiUrl: apiUrl.value
+      apiUrl: apiUrl.value,
+      cidade: cidadeSelecionada.value.nome,
+      estado: cidadeSelecionada.value.estado
     })
   } catch (e: any) {
     error.value = e.message || 'Erro ao executar automação de dinâmica. Verifique se o servidor Python está rodando.'

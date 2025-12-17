@@ -1,1 +1,1 @@
-PERFEITO AGORA TUDO FUNCIONA, A API ESTA FUNCIONANDOA ASSIM TBM?
+faça o commite par ao render atualizar 

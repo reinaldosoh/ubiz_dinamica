@@ -16,6 +16,8 @@ interface DinamicaRequest {
   email?: string
   password?: string
   apiUrl?: string
+  cidade?: string
+  estado?: string
 }
 
 interface DinamicaResponse {

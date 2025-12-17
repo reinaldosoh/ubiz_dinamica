@@ -11,6 +11,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 import time
 import os
+import requests
+from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -44,6 +46,9 @@ class DinamicaRequest(BaseModel):
     headless: bool = False
     email: str = "reinaldo@painel.com.br"
     password: str = "Reinaldo@ubizcar10"
+    cidade: str = "Não informada"
+    estado: str = "Não informado"
+    is_test: bool = False  # Se True, adiciona "OBS: ENVIADO COMO TESTE" no webhook
 
 class DinamicaResponse(BaseModel):
     success: bool
@@ -589,7 +594,7 @@ async def atualizar_dinamica(request: DinamicaRequest):
         
         # Primeiro, navegar de volta para a lista de dinâmicas (caso ainda esteja na tela de edição)
         driver.get("https://cloud.taximachine.com.br/tarifaCategoria/dinamica")
-        time.sleep(1)
+        time.sleep(3)  # Aumentado para dar tempo de carregar no Render
         
         # Clicar na aba Manuais
         driver.execute_script("""
@@ -599,7 +604,7 @@ async def atualizar_dinamica(request: DinamicaRequest):
                 }
             });
         """)
-        time.sleep(1)
+        time.sleep(2)  # Aumentado para Render
         
         # FECHAR MODAL SE ESTIVER ABERTO (modal "Dinâmica automática")
         driver.execute_script("""
@@ -630,10 +635,16 @@ async def atualizar_dinamica(request: DinamicaRequest):
         
         # Encontrar e clicar no toggle do card "Geral manual"
         # O toggle está ao lado do texto "Dinâmica" dentro do card
+        
+        # Estratégia mais robusta: buscar em toda a página por toggles/switches
         toggle_result = driver.execute_script("""
-            console.log('=== BUSCANDO TOGGLE GERAL MANUAL ===');
+            console.log('=== BUSCANDO TOGGLE GERAL MANUAL (ESTRATÉGIA ROBUSTA) ===');
             
-            // Procurar o card "Geral manual"
+            // Estratégia 0: Buscar TODOS os switches/toggles na página primeiro
+            var allSwitches = document.querySelectorAll('[class*="switch"], [class*="Switch"], [role="switch"], input[type="checkbox"]');
+            console.log('Total de switches na página:', allSwitches.length);
+            
+            // Procurar o card "Geral manual" com critérios mais flexíveis
             var allDivs = document.querySelectorAll('div');
             var targetCard = null;
             
@@ -642,10 +653,10 @@ async def atualizar_dinamica(request: DinamicaRequest):
                 var text = div.innerText || '';
                 var rect = div.getBoundingClientRect();
                 
-                // Card deve conter "Geral manual" e "Motoristas"
-                if (text.includes('Geral manual') && text.includes('Motoristas') && 
-                    rect.width > 100 && rect.width < 300 && 
-                    rect.height > 60 && rect.height < 200) {
+                // Card deve conter "Geral manual" - critérios de tamanho mais flexíveis
+                if (text.includes('Geral manual') && 
+                    rect.width > 80 && rect.width < 400 && 
+                    rect.height > 50 && rect.height < 300) {
                     targetCard = div;
                     console.log('Card Geral manual encontrado:', rect.width, 'x', rect.height);
                     break;
@@ -653,16 +664,35 @@ async def atualizar_dinamica(request: DinamicaRequest):
             }
             
             if (!targetCard) {
+                // Fallback: procurar apenas pelo texto "Geral manual"
+                var allElements = document.querySelectorAll('*');
+                for (var i = 0; i < allElements.length; i++) {
+                    var el = allElements[i];
+                    if ((el.innerText || '').includes('Geral manual')) {
+                        // Subir na árvore DOM para encontrar o card pai
+                        var parent = el;
+                        for (var j = 0; j < 5; j++) {
+                            parent = parent.parentElement;
+                            if (!parent) break;
+                            var rect = parent.getBoundingClientRect();
+                            if (rect.width > 100 && rect.height > 80) {
+                                targetCard = parent;
+                                console.log('Card encontrado via fallback:', rect.width, 'x', rect.height);
+                                break;
+                            }
+                        }
+                        if (targetCard) break;
+                    }
+                }
+            }
+            
+            if (!targetCard) {
                 return 'card_geral_manual_not_found';
             }
             
-            // Procurar o toggle - geralmente é um elemento com classe contendo "switch" ou "toggle"
-            // ou um input checkbox, ou um botão pequeno
-            var toggleFound = false;
-            
-            // Estratégia 1: Procurar por classe que contenha switch/toggle
+            // Estratégia 1: Procurar por classe que contenha switch/toggle dentro do card
             var switchElements = targetCard.querySelectorAll('[class*="switch"], [class*="Switch"], [class*="toggle"], [class*="Toggle"]');
-            console.log('Elementos switch/toggle encontrados:', switchElements.length);
+            console.log('Elementos switch/toggle no card:', switchElements.length);
             
             for (var j = 0; j < switchElements.length; j++) {
                 var sw = switchElements[j];
@@ -692,55 +722,57 @@ async def atualizar_dinamica(request: DinamicaRequest):
                 return 'clicked_role_switch';
             }
             
-            // Estratégia 4: Procurar por elemento pequeno e arredondado (típico de toggle)
-            // que esteja próximo ao texto "Dinâmica"
-            var allElements = targetCard.querySelectorAll('*');
-            var dinamicaElement = null;
-            
-            for (var l = 0; l < allElements.length; l++) {
-                var el = allElements[l];
-                if ((el.innerText || '').trim() === 'Dinâmica' || (el.innerText || '').includes('Dinâmica')) {
-                    dinamicaElement = el;
-                    break;
+            // Estratégia 4: Procurar botão dentro do card que possa ser o toggle
+            var buttons = targetCard.querySelectorAll('button');
+            console.log('Botões no card:', buttons.length);
+            for (var b = 0; b < buttons.length; b++) {
+                var btn = buttons[b];
+                var rect = btn.getBoundingClientRect();
+                // Toggle geralmente é pequeno
+                if (rect.width < 80 && rect.height < 40) {
+                    btn.click();
+                    console.log('Clicou em botão pequeno:', rect.width, 'x', rect.height);
+                    return 'clicked_small_button';
                 }
             }
             
-            if (dinamicaElement) {
-                // Procurar elementos próximos ao "Dinâmica"
-                var parent = dinamicaElement.parentElement;
-                if (parent) {
-                    var siblings = parent.querySelectorAll('*');
-                    for (var m = 0; m < siblings.length; m++) {
-                        var sib = siblings[m];
-                        var rect = sib.getBoundingClientRect();
-                        var tag = sib.tagName.toLowerCase();
-                        
-                        // Toggle é geralmente pequeno (30-60px largura)
-                        if (rect.width >= 25 && rect.width <= 70 && rect.height >= 10 && rect.height <= 35) {
-                            if (tag !== 'span' || sib.querySelector('*')) {
-                                sib.click();
-                                console.log('Clicou em elemento próximo a Dinâmica:', tag, rect.width, 'x', rect.height);
-                                return 'clicked_near_dinamica: ' + tag;
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // Estratégia 5: Clicar em qualquer elemento que pareça um círculo/botão pequeno
-            for (var n = 0; n < allElements.length; n++) {
-                var el = allElements[n];
+            // Estratégia 5: Procurar por elemento pequeno e arredondado
+            var allCardElements = targetCard.querySelectorAll('*');
+            for (var n = 0; n < allCardElements.length; n++) {
+                var el = allCardElements[n];
                 var rect = el.getBoundingClientRect();
                 var style = window.getComputedStyle(el);
                 var borderRadius = style.borderRadius;
+                var bgColor = style.backgroundColor;
                 
-                // Elemento pequeno e arredondado
-                if (rect.width >= 15 && rect.width <= 50 && 
-                    rect.height >= 15 && rect.height <= 30 &&
-                    (borderRadius.includes('50%') || parseInt(borderRadius) > 5)) {
+                // Elemento pequeno e arredondado com cor de fundo
+                if (rect.width >= 15 && rect.width <= 60 && 
+                    rect.height >= 10 && rect.height <= 35 &&
+                    bgColor !== 'rgba(0, 0, 0, 0)' && bgColor !== 'transparent') {
                     el.click();
-                    console.log('Clicou em elemento arredondado:', el.tagName, rect.width, 'x', rect.height);
-                    return 'clicked_rounded_element';
+                    console.log('Clicou em elemento arredondado colorido:', el.tagName, rect.width, 'x', rect.height, bgColor);
+                    return 'clicked_colored_element';
+                }
+            }
+            
+            // Estratégia 6: Clicar no primeiro elemento clicável após "Dinâmica"
+            var dinamicaFound = false;
+            for (var m = 0; m < allCardElements.length; m++) {
+                var el = allCardElements[m];
+                var text = (el.innerText || '').trim();
+                
+                if (text === 'Dinâmica' || text.includes('Dinâmica')) {
+                    dinamicaFound = true;
+                    continue;
+                }
+                
+                if (dinamicaFound) {
+                    var rect = el.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0 && rect.width < 100) {
+                        el.click();
+                        console.log('Clicou após Dinâmica:', el.tagName);
+                        return 'clicked_after_dinamica';
+                    }
                 }
             }
             
@@ -748,7 +780,7 @@ async def atualizar_dinamica(request: DinamicaRequest):
         """)
         
         print(f"Toggle resultado: {toggle_result}")
-        time.sleep(1)
+        time.sleep(2)  # Aumentado para Render
         
         # Screenshot final
         screenshot_path = os.path.join(screenshots_dir, f"dinamica_sucesso_{int(time.time())}.png")
@@ -756,6 +788,36 @@ async def atualizar_dinamica(request: DinamicaRequest):
         
         # Navegador permanece aberto para próximas execuções
         # Não fecha mais automaticamente
+        
+        # 8. ENVIAR NOTIFICAÇÃO PARA WEBHOOK N8N
+        try:
+            webhook_url = "https://n8n-webhook.api.soureino.com/webhook/1e765e17-4e6d-4b12-a2ac-533c0d981c62"
+            agora = datetime.now()
+            data_atual = agora.strftime("%d/%m/%Y")
+            hora_atual = agora.strftime("%H:%M:%S")
+            
+            # Verificar se é ambiente de teste (localhost) ou produção (Render)
+            is_localhost = os.environ.get('RENDER') is None
+            
+            mensagem = f"""CIDADE: {request.cidade}
+ESTADO: {request.estado}
+DINAMICA ALTERADA PARA: {request.multiplicador}
+DIA DA ATUALIZACAO: {data_atual}
+HORA DA ATUALIZACAO: {hora_atual}"""
+            
+            # Adicionar OBS de teste se for localhost ou se is_test=True
+            if is_localhost or request.is_test:
+                mensagem += "\n\nOBS: ENVIADO COMO TESTE"
+            
+            webhook_response = requests.post(
+                webhook_url,
+                json={"message": mensagem},
+                headers={"Content-Type": "application/json"},
+                timeout=10
+            )
+            print(f"Webhook n8n enviado: {webhook_response.status_code}")
+        except Exception as webhook_error:
+            print(f"Erro ao enviar webhook n8n: {webhook_error}")
         
         return DinamicaResponse(
             success=True,
