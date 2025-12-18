@@ -14,6 +14,8 @@ import os
 import requests
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
+import threading
+import gc
 
 load_dotenv()
 
@@ -26,6 +28,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Lock para garantir apenas UMA execução por vez (evita múltiplos drivers Chrome)
+execution_lock = threading.Lock()
+is_executing = False
+
+# Fila de execução com timeout (máximo 5 minutos de espera por requisição)
+MAX_WAIT_TIME = 300  # 5 minutos - tempo suficiente para processar várias requisições na fila
 
 # Driver global para reutilização
 global_driver = None
@@ -81,7 +90,36 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "service": "automation-api"}
+    import psutil
+    process = psutil.Process()
+    memory_mb = process.memory_info().rss / 1024 / 1024
+    return {
+        "status": "healthy", 
+        "service": "automation-api",
+        "memory_mb": round(memory_mb, 2),
+        "is_executing": is_executing,
+        "driver_active": global_driver is not None
+    }
+
+@app.post("/driver/close")
+async def close_driver():
+    """Fecha o driver Chrome para liberar memória"""
+    global global_driver, driver_logged_in, is_executing
+    
+    if is_executing:
+        return {"success": False, "message": "Não é possível fechar o driver durante uma execução"}
+    
+    if global_driver:
+        try:
+            global_driver.quit()
+        except:
+            pass
+        global_driver = None
+        driver_logged_in = False
+        gc.collect()
+        return {"success": True, "message": "Driver fechado com sucesso"}
+    
+    return {"success": True, "message": "Nenhum driver ativo"}
 
 @app.post("/login", response_model=LoginResponse)
 async def login_taximachine(credentials: LoginCredentials):
@@ -218,7 +256,23 @@ async def atualizar_dinamica(request: DinamicaRequest):
     """
     Realiza login, navega até Tarifas Dinâmicas, edita ***Geral manual e salva
     """
-    global global_driver, driver_logged_in, last_logged_email
+    global global_driver, driver_logged_in, last_logged_email, is_executing
+    
+    # Aguardar na fila se já houver execução em andamento (máximo 60 segundos)
+    wait_start = time.time()
+    while is_executing:
+        if time.time() - wait_start > MAX_WAIT_TIME:
+            return DinamicaResponse(
+                success=False,
+                message=f"Timeout: automação anterior não finalizou em {MAX_WAIT_TIME} segundos. Tente novamente.",
+                screenshot_path=None
+            )
+        time.sleep(1)  # Aguardar 1 segundo e verificar novamente
+        print(f"Aguardando na fila... ({int(time.time() - wait_start)}s)")
+    
+    # Adquirir lock para esta execução
+    with execution_lock:
+        is_executing = True
     
     print(f"=== INICIANDO AUTOMAÇÃO ===")
     print(f"Email recebido: {request.email}")
@@ -825,6 +879,10 @@ HORA DA ATUALIZACAO: {hora_atual}"""
         except Exception as webhook_error:
             print(f"Erro ao enviar webhook n8n: {webhook_error}")
         
+        # Liberar lock antes de retornar sucesso
+        is_executing = False
+        gc.collect()  # Forçar coleta de lixo para liberar memória
+        
         return DinamicaResponse(
             success=True,
             message=f"Dinâmica atualizada com sucesso! Multiplicador: {request.multiplicador}x",
@@ -842,12 +900,16 @@ HORA DA ATUALIZACAO: {hora_atual}"""
                 global_driver.save_screenshot(screenshot_path)
             except:
                 pass
+        
+        # Liberar lock em caso de erro
+        is_executing = False
+        gc.collect()  # Forçar coleta de lixo para liberar memória
+        
         return DinamicaResponse(
             success=False,
             message=f"Erro geral: {str(e)}",
             screenshot_path=screenshot_path
         )
-        # Não fecha o driver - mantém aberto para próximas execuções
 
 if __name__ == "__main__":
     import uvicorn

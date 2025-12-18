@@ -17,7 +17,10 @@ import {
   Copy,
   ExternalLink,
   TrendingUp,
-  Activity
+  Activity,
+  Pencil,
+  Search,
+  X
 } from 'lucide-vue-next'
 import { useAlert } from '~/composables/useAlert'
 
@@ -34,6 +37,8 @@ interface Cidade {
   ativo: boolean
   taximachine_api_key: string | null
   taximachine_auth_base64: string | null
+  taximachine_email: string | null
+  taximachine_password: string | null
   webhook_id: string | null
   webhook_url: string | null
   webhook_ativo: boolean
@@ -104,9 +109,9 @@ const CONFIG_DINAMICA_PADRAO: ConfigDinamica = {
     { min: 45, max: 49, nivel: 1, multiplicador: 1.5, descricao: 'Crítico' },
     { min: 40, max: 44, nivel: 2, multiplicador: 1.6, descricao: '+ crítico' },
     { min: 35, max: 39, nivel: 2, multiplicador: 1.7, descricao: '++ crítico' },
-    { min: 30, max: 34, nivel: 2, multiplicador: 1.8, descricao: '+++ crítico' },
-    { min: 25, max: 29, nivel: 2, multiplicador: 2.0, descricao: 'Colapso' },
-    { min: 0, max: 24, nivel: 2, multiplicador: 2.5, descricao: 'Colapso extremo' }
+    { min: 30, max: 34, nivel: 2, multiplicador: 1.7, descricao: '+++ crítico' },
+    { min: 25, max: 29, nivel: 2, multiplicador: 1.8, descricao: 'Colapso' },
+    { min: 0, max: 24, nivel: 2, multiplicador: 1.8, descricao: 'Colapso extremo' }
   ]
 }
 
@@ -122,8 +127,8 @@ const novaCidade = ref({
 // Form credenciais
 const credenciaisForm = ref({
   api_key: '',
-  usuario: '',
-  senha: '',
+  taximachine_email: '',
+  taximachine_password: '',
   // Automação
   automation_email: '',
   automation_password: '',
@@ -133,6 +138,44 @@ const credenciaisForm = ref({
 })
 const showPassword = ref(false)
 const showAutomationPassword = ref(false)
+
+// Computed para gerar Base64 automaticamente
+const generatedBase64 = computed(() => {
+  if (credenciaisForm.value.taximachine_email && credenciaisForm.value.taximachine_password) {
+    return btoa(`${credenciaisForm.value.taximachine_email}:${credenciaisForm.value.taximachine_password}`)
+  }
+  return selectedCidade.value?.taximachine_auth_base64 || ''
+})
+
+// Copiar Base64 para clipboard
+async function copiarBase64() {
+  if (generatedBase64.value) {
+    await navigator.clipboard.writeText(generatedBase64.value)
+    alert.success('Base64 copiado!')
+  }
+}
+
+// Modal editar cidade
+const showEditModal = ref(false)
+const editCidadeForm = ref({
+  nome: '',
+  estado: 'MG'
+})
+
+// Filtro de cidades
+const filtroNome = ref('')
+const filtroEstado = ref('')
+
+// Cidades filtradas
+const cidadesFiltradas = computed(() => {
+  return cidades.value.filter(cidade => {
+    const matchNome = !filtroNome.value || 
+      cidade.nome.toLowerCase().includes(filtroNome.value.toLowerCase())
+    const matchEstado = !filtroEstado.value || 
+      cidade.estado === filtroEstado.value
+    return matchNome && matchEstado
+  })
+})
 
 // Estados brasileiros
 const estados = [
@@ -309,13 +352,57 @@ async function toggleAtivo(cidade: Cidade) {
   }
 }
 
+// Abrir modal de edição de cidade
+function abrirEditarCidade(cidade: Cidade) {
+  selectedCidade.value = cidade
+  editCidadeForm.value = {
+    nome: cidade.nome,
+    estado: cidade.estado
+  }
+  showEditModal.value = true
+}
+
+// Salvar edição de cidade
+async function salvarEdicaoCidade() {
+  if (!selectedCidade.value || !editCidadeForm.value.nome.trim()) return
+
+  actionLoading.value = 'editar-cidade'
+  try {
+    const { error } = await supabase
+      .from('cidades')
+      .update({
+        nome: editCidadeForm.value.nome.trim(),
+        estado: editCidadeForm.value.estado,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', selectedCidade.value.id)
+
+    if (error) throw error
+
+    // Atualizar cidade na lista
+    const idx = cidades.value.findIndex(c => c.id === selectedCidade.value!.id)
+    if (idx !== -1) {
+      cidades.value[idx].nome = editCidadeForm.value.nome.trim()
+      cidades.value[idx].estado = editCidadeForm.value.estado
+    }
+
+    showEditModal.value = false
+    alert.success('Cidade atualizada com sucesso!')
+  } catch (e) {
+    console.error('Erro ao atualizar cidade:', e)
+    alert.error('Erro ao atualizar cidade')
+  } finally {
+    actionLoading.value = null
+  }
+}
+
 // Abrir modal de credenciais
 function abrirCredenciais(cidade: Cidade) {
   selectedCidade.value = cidade
   credenciaisForm.value = {
     api_key: cidade.taximachine_api_key || '',
-    usuario: '',
-    senha: '',
+    taximachine_email: cidade.taximachine_email || '',
+    taximachine_password: cidade.taximachine_password || '',
     automation_email: cidade.automation_email || '',
     automation_password: cidade.automation_password || '',
     automation_url: cidade.automation_url || 'https://ubiz-dinamica.onrender.com',
@@ -380,14 +467,17 @@ async function salvarCredenciais() {
     let authBase64 = selectedCidade.value.taximachine_auth_base64
 
     // Se usuário e senha foram fornecidos, gerar novo base64
-    if (credenciaisForm.value.usuario && credenciaisForm.value.senha) {
-      authBase64 = btoa(`${credenciaisForm.value.usuario}:${credenciaisForm.value.senha}`)
+    // Gerar Base64 se email e senha foram fornecidos
+    if (credenciaisForm.value.taximachine_email && credenciaisForm.value.taximachine_password) {
+      authBase64 = btoa(`${credenciaisForm.value.taximachine_email}:${credenciaisForm.value.taximachine_password}`)
     }
 
     const { error } = await supabase
       .from('cidades')
       .update({
         taximachine_api_key: credenciaisForm.value.api_key || null,
+        taximachine_email: credenciaisForm.value.taximachine_email || null,
+        taximachine_password: credenciaisForm.value.taximachine_password || null,
         taximachine_auth_base64: authBase64,
         // Campos de automação
         automation_email: credenciaisForm.value.automation_email || null,
@@ -405,6 +495,8 @@ async function salvarCredenciais() {
     const cidade = cidades.value.find(c => c.id === selectedCidade.value?.id)
     if (cidade) {
       cidade.taximachine_api_key = credenciaisForm.value.api_key || null
+      cidade.taximachine_email = credenciaisForm.value.taximachine_email || null
+      cidade.taximachine_password = credenciaisForm.value.taximachine_password || null
       cidade.taximachine_auth_base64 = authBase64
       cidade.automation_email = credenciaisForm.value.automation_email || null
       cidade.automation_password = credenciaisForm.value.automation_password || null
@@ -641,7 +733,43 @@ onMounted(() => {
 
       <!-- Lista de Cidades -->
       <div class="card">
-        <h2 class="card-title mb-6">Cidades Cadastradas</h2>
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+          <h2 class="card-title">Cidades Cadastradas</h2>
+          
+          <!-- Filtros -->
+          <div class="flex flex-col sm:flex-row gap-2">
+            <div class="relative w-full sm:w-48">
+              <Search class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
+              <input 
+                v-model="filtroNome"
+                type="text"
+                placeholder="Buscar cidade..."
+                class="w-full bg-bg-tertiary border border-border-secondary rounded-lg pl-9 pr-8 py-2 text-sm text-text-primary focus:outline-none focus:border-primary"
+              />
+              <button 
+                v-if="filtroNome"
+                @click="filtroNome = ''"
+                class="absolute right-2 top-1/2 -translate-y-1/2 text-text-tertiary hover:text-text-primary"
+              >
+                <X class="w-4 h-4" />
+              </button>
+            </div>
+            
+            <div class="w-full sm:w-48">
+              <SearchableSelect
+                v-model="filtroEstado"
+                :options="[{ value: '', label: 'Todos UFs' }, ...estadosOptions]"
+                placeholder="Todos UFs"
+                search-placeholder="Buscar UF..."
+              />
+            </div>
+          </div>
+        </div>
+
+        <!-- Contador de resultados -->
+        <p v-if="filtroNome || filtroEstado" class="text-text-tertiary text-sm mb-4">
+          {{ cidadesFiltradas.length }} cidade(s) encontrada(s)
+        </p>
 
         <div v-if="cidades.length === 0" class="text-center py-12">
           <MapPin class="w-12 h-12 text-text-tertiary mx-auto mb-4" />
@@ -652,9 +780,20 @@ onMounted(() => {
           </button>
         </div>
 
+        <div v-else-if="cidadesFiltradas.length === 0" class="text-center py-12">
+          <Search class="w-12 h-12 text-text-tertiary mx-auto mb-4" />
+          <p class="text-text-secondary">Nenhuma cidade encontrada com os filtros aplicados</p>
+          <button 
+            class="btn-secondary mt-4" 
+            @click="filtroNome = ''; filtroEstado = ''"
+          >
+            Limpar Filtros
+          </button>
+        </div>
+
         <div v-else class="space-y-4">
           <div 
-            v-for="cidade in cidades" 
+            v-for="cidade in cidadesFiltradas" 
             :key="cidade.id"
             class="bg-bg-tertiary rounded-lg p-4 border border-border-secondary hover:border-primary/50 transition-colors"
           >
@@ -767,6 +906,14 @@ onMounted(() => {
                 </button>
 
                 <button 
+                  class="p-2 rounded-lg text-blue-400 hover:bg-blue-400/10 transition-colors"
+                  @click="abrirEditarCidade(cidade)"
+                  title="Editar cidade"
+                >
+                  <Pencil class="w-5 h-5" />
+                </button>
+
+                <button 
                   class="p-2 rounded-lg hover:bg-bg-secondary transition-colors"
                   :class="cidade.ativo ? 'text-green-400' : 'text-red-400'"
                   @click="toggleAtivo(cidade)"
@@ -840,9 +987,57 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- Modal Credenciais -->
-    <div v-if="showCredentialsModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+    <!-- Modal Editar Cidade -->
+    <div v-if="showEditModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div class="bg-bg-secondary rounded-xl p-6 w-full max-w-md border border-border-secondary">
+        <h3 class="text-xl font-semibold text-text-primary mb-4">Editar Cidade</h3>
+        
+        <form @submit.prevent="salvarEdicaoCidade" class="space-y-4">
+          <div>
+            <label class="block text-text-secondary text-sm mb-2">Nome da Cidade</label>
+            <input 
+              v-model="editCidadeForm.nome"
+              type="text"
+              class="w-full bg-bg-tertiary border border-border-secondary rounded-lg px-4 py-2 text-text-primary focus:outline-none focus:border-primary"
+              placeholder="Ex: Belo Horizonte"
+              required
+            />
+          </div>
+
+          <div>
+            <label class="block text-text-secondary text-sm mb-2">Estado</label>
+            <SearchableSelect
+              v-model="editCidadeForm.estado"
+              :options="estadosOptions"
+              placeholder="Selecionar estado"
+              search-placeholder="Buscar estado..."
+            />
+          </div>
+
+          <div class="flex gap-3 pt-4">
+            <button 
+              type="button"
+              class="btn-secondary flex-1"
+              @click="showEditModal = false"
+            >
+              Cancelar
+            </button>
+            <button 
+              type="submit"
+              class="btn-primary flex-1 flex items-center justify-center gap-2"
+              :disabled="actionLoading === 'editar-cidade'"
+            >
+              <Loader2 v-if="actionLoading === 'editar-cidade'" class="w-4 h-4 animate-spin" />
+              Salvar Alterações
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal Credenciais -->
+    <div v-if="showCredentialsModal" class="fixed inset-0 bg-black/50 flex items-start justify-center z-50 p-4 overflow-y-auto">
+      <div class="bg-bg-secondary rounded-xl p-6 w-full max-w-md border border-border-secondary my-4">
         <h3 class="text-xl font-semibold text-text-primary mb-2">Credenciais TaxiMachine</h3>
         <p class="text-text-tertiary text-sm mb-4">{{ selectedCidade?.nome }}</p>
         
@@ -858,13 +1053,13 @@ onMounted(() => {
           </div>
 
           <div class="border-t border-border-secondary pt-4">
-            <p class="text-text-tertiary text-xs mb-3">Preencha usuário e senha para gerar a autenticação Basic:</p>
+            <p class="text-text-tertiary text-xs mb-3">Credenciais de autenticação da API TaxiMachine:</p>
             
             <div class="space-y-3">
               <div>
-                <label class="block text-text-secondary text-sm mb-2">Usuário (email)</label>
+                <label class="block text-text-secondary text-sm mb-2">Email (usuário API)</label>
                 <input 
-                  v-model="credenciaisForm.usuario"
+                  v-model="credenciaisForm.taximachine_email"
                   type="email"
                   class="w-full bg-bg-tertiary border border-border-secondary rounded-lg px-4 py-2 text-text-primary focus:outline-none focus:border-primary"
                   placeholder="seu@email.com"
@@ -872,10 +1067,10 @@ onMounted(() => {
               </div>
 
               <div>
-                <label class="block text-text-secondary text-sm mb-2">Senha</label>
+                <label class="block text-text-secondary text-sm mb-2">Senha (API)</label>
                 <div class="relative">
                   <input 
-                    v-model="credenciaisForm.senha"
+                    v-model="credenciaisForm.taximachine_password"
                     :type="showPassword ? 'text' : 'password'"
                     class="w-full bg-bg-tertiary border border-border-secondary rounded-lg px-4 py-2 pr-10 text-text-primary focus:outline-none focus:border-primary"
                     placeholder="Sua senha"
@@ -892,11 +1087,22 @@ onMounted(() => {
             </div>
           </div>
 
-          <div v-if="selectedCidade?.taximachine_auth_base64" class="bg-green-400/10 rounded-lg p-3">
-            <p class="text-green-400 text-sm flex items-center gap-2">
-              <CheckCircle class="w-4 h-4" />
-              Autenticação já configurada
-            </p>
+          <!-- Base64 gerado -->
+          <div v-if="generatedBase64" class="bg-bg-tertiary rounded-lg p-3">
+            <div class="flex items-center justify-between mb-2">
+              <p class="text-text-secondary text-sm font-medium">Base64 (Auth Header)</p>
+              <button 
+                type="button"
+                @click="copiarBase64"
+                class="text-primary hover:text-primary/80 text-sm flex items-center gap-1"
+              >
+                <Copy class="w-3 h-3" />
+                Copiar
+              </button>
+            </div>
+            <code class="block bg-bg-primary px-3 py-2 rounded text-text-tertiary text-xs break-all">
+              {{ generatedBase64 }}
+            </code>
           </div>
 
           <!-- Seção Automação TaxiMachine -->
@@ -950,11 +1156,15 @@ onMounted(() => {
               <div>
                 <label class="block text-text-secondary text-sm mb-2">Multiplicador Mínimo</label>
                 <input 
-                  v-model.number="credenciaisForm.automation_multiplicador_minimo"
-                  type="number"
-                  step="0.1"
-                  min="1.0"
-                  max="3.0"
+                  :value="credenciaisForm.automation_multiplicador_minimo"
+                  @input="(e: Event) => { 
+                    const val = (e.target as HTMLInputElement).value.replace(',', '.');
+                    const num = parseFloat(val);
+                    if (!isNaN(num)) credenciaisForm.automation_multiplicador_minimo = num;
+                  }"
+                  type="text"
+                  inputmode="decimal"
+                  pattern="[0-9]*[.,]?[0-9]*"
                   class="w-full bg-bg-tertiary border border-border-secondary rounded-lg px-4 py-2 text-text-primary focus:outline-none focus:border-primary"
                   placeholder="1.1"
                 />
@@ -980,7 +1190,7 @@ onMounted(() => {
             </div>
           </div>
 
-          <div class="flex gap-3 pt-4">
+          <div class="flex gap-3 pt-4 sticky bottom-0 bg-bg-secondary pb-2">
             <button 
               type="button"
               class="btn-secondary flex-1"

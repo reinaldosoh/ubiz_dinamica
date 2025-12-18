@@ -149,11 +149,15 @@
               <label class="block text-text-secondary text-sm mb-2">Fator Multiplicador</label>
               <div class="relative">
                 <input 
-                  v-model.number="multiplicador"
-                  type="number"
-                  step="0.1"
-                  min="1"
-                  max="5"
+                  :value="multiplicador"
+                  @input="(e: Event) => { 
+                    const val = (e.target as HTMLInputElement).value.replace(',', '.');
+                    const num = parseFloat(val);
+                    if (!isNaN(num)) multiplicador = num;
+                  }"
+                  type="text"
+                  inputmode="decimal"
+                  pattern="[0-9]*[.,]?[0-9]*"
                   class="w-full bg-bg-primary border border-border-secondary rounded-lg px-4 py-3 text-text-primary text-xl font-bold focus:outline-none focus:border-primary"
                   placeholder="1.3"
                 />
