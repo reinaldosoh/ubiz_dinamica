@@ -16,62 +16,8 @@ from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 import threading
 import gc
-from supabase import create_client, Client
 
 load_dotenv()
-
-# Configurar Supabase
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-supabase_client: Client = None
-
-if SUPABASE_URL and SUPABASE_KEY:
-    try:
-        supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        print("Supabase conectado com sucesso!")
-    except Exception as e:
-        print(f"Erro ao conectar Supabase: {e}")
-
-def buscar_corridas_stats(cidade_nome: str) -> dict:
-    """Busca estatísticas de corridas dos últimos 15 minutos"""
-    if not supabase_client:
-        return {}
-    
-    try:
-        # Últimos 15 minutos
-        quinze_min_atras = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
-        
-        response = supabase_client.table('taximachine_webhooks').select(
-            'request_id, status_code'
-        ).gte(
-            'event_datetime', quinze_min_atras
-        ).eq(
-            'cidade_nome', cidade_nome
-        ).order(
-            'event_datetime', desc=True
-        ).execute()
-        
-        if not response.data:
-            return {}
-        
-        # Agrupar por request_id e pegar status mais recente
-        corridas_unicas = {}
-        for corrida in response.data:
-            rid = corrida.get('request_id')
-            if rid and rid not in corridas_unicas:
-                corridas_unicas[rid] = corrida.get('status_code', '')
-        
-        # Contar por status
-        stats = {'P': 0, 'F': 0, 'C': 0, 'N': 0, 'S': 0, 'A': 0, 'total': 0}
-        for status in corridas_unicas.values():
-            if status in stats:
-                stats[status] += 1
-            stats['total'] += 1
-        
-        return stats
-    except Exception as e:
-        print(f"Erro ao buscar corridas: {e}")
-        return {}
 
 app = FastAPI(title="TaxiMachine Automation API", version="1.0.0")
 
@@ -169,6 +115,15 @@ class LoginResponse(BaseModel):
     message: str
     screenshot_path: Optional[str] = None
 
+class CorridasStats(BaseModel):
+    total: int = 0
+    pendentes: int = 0
+    finalizadas: int = 0
+    canceladas: int = 0
+    nao_atendidas: int = 0
+    aceitas: int = 0
+    em_espera: int = 0
+
 class DinamicaRequest(BaseModel):
     multiplicador: float
     headless: bool = False
@@ -177,6 +132,7 @@ class DinamicaRequest(BaseModel):
     cidade: str = "Não informada"
     estado: str = "Não informado"
     is_test: bool = False  # Se True, adiciona "OBS: ENVIADO COMO TESTE" no webhook
+    corridas_stats: Optional[CorridasStats] = None  # Estatísticas de corridas passadas pelo frontend
 
 class DinamicaResponse(BaseModel):
     success: bool
@@ -867,15 +823,15 @@ async def atualizar_dinamica(request: DinamicaRequest):
             # Log para debug
             print(f"Webhook - Cidade: {request.cidade}, Estado: {request.estado}")
             
-            # Buscar estatísticas de corridas dos últimos 15 minutos
-            stats = buscar_corridas_stats(request.cidade)
-            total_corridas = stats.get('total', 0)
-            canceladas = stats.get('C', 0)
-            pendentes = stats.get('P', 0)
-            finalizadas = stats.get('F', 0)
-            aceitas = stats.get('A', 0)
-            em_espera = stats.get('S', 0)
-            nao_atendidas = stats.get('N', 0)
+            # Usar estatísticas passadas pelo frontend (se disponíveis)
+            stats = request.corridas_stats
+            total_corridas = stats.total if stats else 0
+            canceladas = stats.canceladas if stats else 0
+            pendentes = stats.pendentes if stats else 0
+            finalizadas = stats.finalizadas if stats else 0
+            aceitas = stats.aceitas if stats else 0
+            em_espera = stats.em_espera if stats else 0
+            nao_atendidas = stats.nao_atendidas if stats else 0
             
             mensagem = f"""CIDADE: {request.cidade}
 ESTADO: {request.estado}

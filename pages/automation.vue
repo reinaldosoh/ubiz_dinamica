@@ -407,6 +407,41 @@ const executeLogin = async (mode: 'headless' | 'visual') => {
   }
 }
 
+// Buscar estatísticas de corridas dos últimos 15 minutos
+async function fetchCorridasStats(cidadeNome: string) {
+  const quinzeMinutosAtras = new Date(Date.now() - 15 * 60 * 1000).toISOString()
+  
+  const { data, error: err } = await supabase
+    .from('taximachine_webhooks')
+    .select('request_id, status_code')
+    .gte('event_datetime', quinzeMinutosAtras)
+    .eq('cidade_nome', cidadeNome)
+    .order('event_datetime', { ascending: false })
+
+  if (err || !data) return null
+
+  // Agrupar por request_id e pegar status mais recente
+  const corridasUnicas = new Map<number, string>()
+  for (const corrida of data) {
+    if (!corridasUnicas.has(corrida.request_id)) {
+      corridasUnicas.set(corrida.request_id, corrida.status_code)
+    }
+  }
+
+  // Contar por status
+  const stats = { total: 0, pendentes: 0, finalizadas: 0, canceladas: 0, nao_atendidas: 0, aceitas: 0, em_espera: 0 }
+  for (const status of corridasUnicas.values()) {
+    stats.total++
+    if (status === 'P') stats.pendentes++
+    else if (status === 'F') stats.finalizadas++
+    else if (status === 'C') stats.canceladas++
+    else if (status === 'N') stats.nao_atendidas++
+    else if (status === 'A') stats.aceitas++
+    else if (status === 'S') stats.em_espera++
+  }
+  return stats
+}
+
 const executarDinamica = async (headless: boolean) => {
   if (!multiplicador.value) return
   if (!cidadeSelecionada.value) {
@@ -420,6 +455,9 @@ const executarDinamica = async (headless: boolean) => {
   result.value = null
   
   try {
+    // Buscar estatísticas de corridas antes de executar
+    const corridasStats = await fetchCorridasStats(cidadeSelecionada.value.nome)
+    
     result.value = await atualizarDinamica({
       multiplicador: multiplicador.value,
       headless,
@@ -427,7 +465,8 @@ const executarDinamica = async (headless: boolean) => {
       password: cidadeSelecionada.value.automation_password || undefined,
       apiUrl: apiUrl.value,
       cidade: cidadeSelecionada.value.nome,
-      estado: cidadeSelecionada.value.estado
+      estado: cidadeSelecionada.value.estado,
+      corridas_stats: corridasStats || undefined
     })
   } catch (e: any) {
     error.value = e.message || 'Erro ao executar automação de dinâmica. Verifique se o servidor Python está rodando.'

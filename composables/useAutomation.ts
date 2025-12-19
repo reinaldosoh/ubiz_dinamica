@@ -10,6 +10,16 @@ interface LoginResponse {
   screenshot_path: string | null
 }
 
+interface CorridasStats {
+  total: number
+  pendentes: number
+  finalizadas: number
+  canceladas: number
+  nao_atendidas: number
+  aceitas: number
+  em_espera: number
+}
+
 interface DinamicaRequest {
   multiplicador: number
   headless?: boolean
@@ -18,6 +28,7 @@ interface DinamicaRequest {
   apiUrl?: string
   cidade?: string
   estado?: string
+  corridas_stats?: CorridasStats
 }
 
 interface DinamicaResponse {
