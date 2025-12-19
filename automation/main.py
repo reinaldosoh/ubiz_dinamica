@@ -575,7 +575,40 @@ async def atualizar_dinamica(request: DinamicaRequest):
         
         time.sleep(2)
         
-        # 7. ATIVAR A DINÂMICA - Clicar no toggle APENAS se não estiver ativo
+        # 7. ENVIAR NOTIFICAÇÃO PARA WEBHOOK N8N (logo após salvar)
+        try:
+            webhook_url = "https://n8n-webhook.api.soureino.com/webhook/1e765e17-4e6d-4b12-a2ac-533c0d981c62"
+            
+            # Usar timezone de Brasília (UTC-3)
+            tz_brasilia = timezone(timedelta(hours=-3))
+            agora = datetime.now(tz_brasilia)
+            data_atual = agora.strftime("%d/%m/%Y")
+            hora_atual = agora.strftime("%H:%M:%S")
+            
+            # Log para debug
+            print(f"Webhook - Cidade: {request.cidade}, Estado: {request.estado}")
+            
+            mensagem = f"""CIDADE: {request.cidade}
+ESTADO: {request.estado}
+DINAMICA ALTERADA PARA: {request.multiplicador}
+DIA DA ATUALIZACAO: {data_atual}
+HORA DA ATUALIZACAO: {hora_atual}"""
+            
+            # Adicionar OBS de teste apenas se is_test=True
+            if request.is_test:
+                mensagem += "\n\nOBS: ENVIADO COMO TESTE"
+            
+            webhook_response = requests.post(
+                webhook_url,
+                json={"message": mensagem},
+                headers={"Content-Type": "application/json"},
+                timeout=10
+            )
+            print(f"Webhook n8n enviado: {webhook_response.status_code}")
+        except Exception as webhook_error:
+            print(f"Erro ao enviar webhook n8n: {webhook_error}")
+        
+        # 8. ATIVAR A DINÂMICA - Clicar no toggle APENAS se não estiver ativo
         # Baseado no screenshot: o toggle está no header do card, ao lado do valor "1.2x"
         
         # Primeiro, navegar de volta para a lista de dinâmicas (caso ainda esteja na tela de edição)
@@ -771,39 +804,6 @@ async def atualizar_dinamica(request: DinamicaRequest):
         # Screenshot final
         screenshot_path = os.path.join(screenshots_dir, f"dinamica_sucesso_{int(time.time())}.png")
         driver.save_screenshot(screenshot_path)
-        
-        # 8. ENVIAR NOTIFICAÇÃO PARA WEBHOOK N8N
-        try:
-            webhook_url = "https://n8n-webhook.api.soureino.com/webhook/1e765e17-4e6d-4b12-a2ac-533c0d981c62"
-            
-            # Usar timezone de Brasília (UTC-3)
-            tz_brasilia = timezone(timedelta(hours=-3))
-            agora = datetime.now(tz_brasilia)
-            data_atual = agora.strftime("%d/%m/%Y")
-            hora_atual = agora.strftime("%H:%M:%S")
-            
-            # Log para debug
-            print(f"Webhook - Cidade: {request.cidade}, Estado: {request.estado}")
-            
-            mensagem = f"""CIDADE: {request.cidade}
-ESTADO: {request.estado}
-DINAMICA ALTERADA PARA: {request.multiplicador}
-DIA DA ATUALIZACAO: {data_atual}
-HORA DA ATUALIZACAO: {hora_atual}"""
-            
-            # Adicionar OBS de teste apenas se is_test=True
-            if request.is_test:
-                mensagem += "\n\nOBS: ENVIADO COMO TESTE"
-            
-            webhook_response = requests.post(
-                webhook_url,
-                json={"message": mensagem},
-                headers={"Content-Type": "application/json"},
-                timeout=10
-            )
-            print(f"Webhook n8n enviado: {webhook_response.status_code}")
-        except Exception as webhook_error:
-            print(f"Erro ao enviar webhook n8n: {webhook_error}")
         
         # MODO PARALELO: Fechar driver após uso e decrementar contador
         if driver:
