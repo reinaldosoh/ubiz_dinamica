@@ -782,9 +782,6 @@ async def atualizar_dinamica(request: DinamicaRequest):
             data_atual = agora.strftime("%d/%m/%Y")
             hora_atual = agora.strftime("%H:%M:%S")
             
-            # Verificar se é ambiente de teste (localhost) ou produção (Render)
-            is_localhost = os.environ.get('RENDER') is None
-            
             # Log para debug
             print(f"Webhook - Cidade: {request.cidade}, Estado: {request.estado}")
             
@@ -794,8 +791,8 @@ DINAMICA ALTERADA PARA: {request.multiplicador}
 DIA DA ATUALIZACAO: {data_atual}
 HORA DA ATUALIZACAO: {hora_atual}"""
             
-            # Adicionar OBS de teste se for localhost ou se is_test=True
-            if is_localhost or request.is_test:
+            # Adicionar OBS de teste apenas se is_test=True
+            if request.is_test:
                 mensagem += "\n\nOBS: ENVIADO COMO TESTE"
             
             webhook_response = requests.post(
