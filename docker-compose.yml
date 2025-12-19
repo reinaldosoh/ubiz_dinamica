@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  automation:
+    build:
+      context: ./automation
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - CHROME_BIN=/usr/bin/chromium
+      - PORT=8000
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'

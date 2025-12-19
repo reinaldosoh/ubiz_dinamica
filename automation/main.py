@@ -132,7 +132,7 @@ class DinamicaRequest(BaseModel):
     cidade: str = "Não informada"
     estado: str = "Não informado"
     is_test: bool = False  # Se True, adiciona "OBS: ENVIADO COMO TESTE" no webhook
-    corridas_stats: Optional[CorridasStats] = None  # Estatísticas de corridas passadas pelo frontend
+    corridas_stats: Optional[CorridasStats] = None  # Estatísticas passadas por quem chama a API
 
 class DinamicaResponse(BaseModel):
     success: bool
@@ -823,7 +823,7 @@ async def atualizar_dinamica(request: DinamicaRequest):
             # Log para debug
             print(f"Webhook - Cidade: {request.cidade}, Estado: {request.estado}")
             
-            # Usar estatísticas passadas pelo frontend (se disponíveis)
+            # Usar estatísticas passadas como parâmetro (se disponíveis)
             stats = request.corridas_stats
             total_corridas = stats.total if stats else 0
             canceladas = stats.canceladas if stats else 0
