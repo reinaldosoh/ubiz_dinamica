@@ -1,0 +1,34 @@
+{
+  "services": {
+    "automation": {
+      "type": "app",
+      "data": {
+        "projectName": "ubiz-dinamica",
+        "serviceName": "automation",
+        "source": {
+          "type": "github",
+          "owner": "reinaldosoh",
+          "repo": "ubiz_dinamica",
+          "ref": "main",
+          "path": "/automation"
+        },
+        "build": {
+          "type": "dockerfile",
+          "file": "Dockerfile"
+        },
+        "env": "CHROME_BIN=/usr/bin/chromium\nPORT=8000",
+        "domains": [
+          {
+            "host": "$(EASYPANEL_DOMAIN)"
+          }
+        ],
+        "ports": [
+          {
+            "published": 8000,
+            "target": 8000
+          }
+        ]
+      }
+    }
+  }
+}
