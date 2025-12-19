@@ -404,27 +404,49 @@ async def atualizar_dinamica(request: DinamicaRequest):
         """)
         time.sleep(1)
         
-        # 4. ENCONTRAR "***Geral manual" E CLICAR NOS 3 PONTOS
-        # Baseado no screenshot: o card tem texto "***Geral manual" e "Motoristas livres"
-        # O ícone de 3 pontos (⋮) está no canto superior direito do card
+        # 4. ENCONTRAR CARD DE DINÂMICA E CLICAR NOS 3 PONTOS
+        # Estratégia: procurar por cards que contenham "manual" ou "Geral" na aba Manuais
         
-        # Primeiro, encontrar o card e clicar nos 3 pontos
         click_result = driver.execute_script("""
-            // Procurar por elementos que contenham "Geral manual"
+            // Estratégia 1: Procurar por cards com texto "manual" ou "Geral"
             var elements = document.querySelectorAll('*');
             var targetCard = null;
+            
+            // Lista de textos possíveis para encontrar o card
+            var possibleTexts = ['Geral manual', 'geral manual', 'Manual', 'manual'];
             
             for (var i = 0; i < elements.length; i++) {
                 var el = elements[i];
                 var text = el.innerText || '';
+                var rect = el.getBoundingClientRect();
                 
-                // Encontrar o card específico
-                if (text.includes('Geral manual') && text.includes('Motoristas') && !text.includes('Dinâmicas')) {
-                    var rect = el.getBoundingClientRect();
-                    // Card tem tamanho específico (baseado no screenshot ~180x120)
-                    if (rect.width > 100 && rect.width < 250 && rect.height > 80 && rect.height < 200) {
+                // Card deve ter tamanho razoável e estar visível
+                if (rect.width < 100 || rect.width > 400 || rect.height < 50 || rect.height > 300) continue;
+                if (rect.top < 0 || rect.left < 0) continue;
+                
+                // Verificar se contém algum dos textos possíveis
+                for (var j = 0; j < possibleTexts.length; j++) {
+                    if (text.includes(possibleTexts[j]) && !text.includes('Dinâmicas automáticas')) {
                         targetCard = el;
+                        console.log('Card encontrado com texto:', possibleTexts[j]);
                         break;
+                    }
+                }
+                if (targetCard) break;
+            }
+            
+            // Estratégia 2: Se não encontrou, procurar o primeiro card visível na aba Manuais
+            if (!targetCard) {
+                var cards = document.querySelectorAll('[class*="card"], [class*="Card"]');
+                for (var k = 0; k < cards.length; k++) {
+                    var card = cards[k];
+                    var rect = card.getBoundingClientRect();
+                    if (rect.width > 100 && rect.width < 400 && rect.height > 50 && rect.height < 300) {
+                        if (rect.top > 100 && rect.left > 0) {
+                            targetCard = card;
+                            console.log('Card encontrado via classe card');
+                            break;
+                        }
                     }
                 }
             }
@@ -433,30 +455,31 @@ async def atualizar_dinamica(request: DinamicaRequest):
                 return 'card_not_found';
             }
             
-            // Encontrar o botão de 3 pontos - procurar por SVG ou botão no canto direito
+            // Encontrar o botão de 3 pontos (menu)
             var cardRect = targetCard.getBoundingClientRect();
             var allClickables = targetCard.querySelectorAll('button, svg, [role="button"]');
             
-            for (var j = 0; j < allClickables.length; j++) {
-                var btn = allClickables[j];
+            for (var m = 0; m < allClickables.length; m++) {
+                var btn = allClickables[m];
                 var btnRect = btn.getBoundingClientRect();
                 
                 // O botão de 3 pontos está no canto superior direito
-                // Verificar se está na parte direita do card
-                if (btnRect.left > cardRect.left + cardRect.width * 0.6) {
+                if (btnRect.left > cardRect.left + cardRect.width * 0.5) {
                     var clickTarget = btn.closest('button') || btn;
                     clickTarget.click();
                     return 'clicked: ' + clickTarget.tagName;
                 }
             }
             
-            // Fallback: procurar por ícone de menu (3 pontos verticais)
+            // Fallback: clicar no último SVG do card (geralmente é o menu)
             var svgs = targetCard.querySelectorAll('svg');
             if (svgs.length > 0) {
                 var lastSvg = svgs[svgs.length - 1];
                 var parent = lastSvg.closest('button') || lastSvg.parentElement;
-                parent.click();
-                return 'clicked_svg_parent';
+                if (parent) {
+                    parent.click();
+                    return 'clicked_svg_parent';
+                }
             }
             
             return 'button_not_found';
