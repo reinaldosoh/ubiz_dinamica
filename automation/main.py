@@ -29,16 +29,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Lock para garantir apenas UMA execução por vez (evita múltiplos drivers Chrome)
-execution_lock = threading.Lock()
-is_executing = False
+# MODO PARALELO: Cada requisição cria seu próprio driver (sem fila)
+# Isso pode usar mais memória, mas elimina o delay
 
-# Fila de execução com timeout (máximo 5 minutos de espera por requisição)
-MAX_WAIT_TIME = 300  # 5 minutos - tempo suficiente para processar várias requisições na fila
-
-# Driver global para reutilização
-global_driver = None
-driver_logged_in = False
+# Contador de execuções ativas (apenas para monitoramento)
+active_executions = 0
+executions_lock = threading.Lock()
 
 class LoginCredentials(BaseModel):
     email: str = "reinaldo@painel.com.br"
@@ -97,29 +93,15 @@ async def health():
         "status": "healthy", 
         "service": "automation-api",
         "memory_mb": round(memory_mb, 2),
-        "is_executing": is_executing,
-        "driver_active": global_driver is not None
+        "active_executions": active_executions,
+        "mode": "parallel"
     }
 
 @app.post("/driver/close")
 async def close_driver():
-    """Fecha o driver Chrome para liberar memória"""
-    global global_driver, driver_logged_in, is_executing
-    
-    if is_executing:
-        return {"success": False, "message": "Não é possível fechar o driver durante uma execução"}
-    
-    if global_driver:
-        try:
-            global_driver.quit()
-        except:
-            pass
-        global_driver = None
-        driver_logged_in = False
-        gc.collect()
-        return {"success": True, "message": "Driver fechado com sucesso"}
-    
-    return {"success": True, "message": "Nenhum driver ativo"}
+    """Endpoint mantido para compatibilidade - no modo paralelo cada driver é fechado após uso"""
+    gc.collect()
+    return {"success": True, "message": "Modo paralelo: drivers são fechados automaticamente após cada execução"}
 
 @app.post("/login", response_model=LoginResponse)
 async def login_taximachine(credentials: LoginCredentials):
@@ -228,171 +210,121 @@ async def visual_login():
     """
     return await login_taximachine(LoginCredentials(headless=False))
 
-def get_or_create_driver(headless: bool = False):
-    """Obtém o driver existente ou cria um novo"""
-    global global_driver, driver_logged_in
-    
-    # Verificar se o driver existente ainda está funcionando
-    if global_driver is not None:
-        try:
-            # Testar se o driver ainda está ativo
-            global_driver.current_url
-            return global_driver, True  # Driver existente, já logado
-        except:
-            # Driver morreu, criar novo
-            global_driver = None
-            driver_logged_in = False
-    
-    # Criar novo driver
-    global_driver = create_driver(headless=headless)
-    driver_logged_in = False
-    return global_driver, False  # Novo driver, precisa logar
-
-# Armazenar último email usado para detectar mudança de conta
-last_logged_email = None
-
 @app.post("/dinamica/atualizar", response_model=DinamicaResponse)
 async def atualizar_dinamica(request: DinamicaRequest):
     """
+    MODO PARALELO: Cada requisição cria seu próprio driver Chrome
     Realiza login, navega até Tarifas Dinâmicas, edita ***Geral manual e salva
     """
-    global global_driver, driver_logged_in, last_logged_email, is_executing
+    global active_executions
     
-    # Aguardar na fila se já houver execução em andamento (máximo 60 segundos)
-    wait_start = time.time()
-    while is_executing:
-        if time.time() - wait_start > MAX_WAIT_TIME:
-            return DinamicaResponse(
-                success=False,
-                message=f"Timeout: automação anterior não finalizou em {MAX_WAIT_TIME} segundos. Tente novamente.",
-                screenshot_path=None
-            )
-        time.sleep(1)  # Aguardar 1 segundo e verificar novamente
-        print(f"Aguardando na fila... ({int(time.time() - wait_start)}s)")
+    # Incrementar contador de execuções ativas
+    with executions_lock:
+        active_executions += 1
     
-    # Adquirir lock para esta execução
-    with execution_lock:
-        is_executing = True
-    
-    print(f"=== INICIANDO AUTOMAÇÃO ===")
+    print(f"=== INICIANDO AUTOMAÇÃO (Execuções ativas: {active_executions}) ===")
     print(f"Email recebido: {request.email}")
     print(f"Multiplicador: {request.multiplicador}")
     print(f"Headless: {request.headless}")
     
+    driver = None
     try:
-        # Se mudou de conta, forçar novo login
-        if last_logged_email and last_logged_email != request.email:
-            print(f"Mudança de conta detectada: {last_logged_email} -> {request.email}")
-            if global_driver:
-                try:
-                    global_driver.quit()
-                except:
-                    pass
-                global_driver = None
-            driver_logged_in = False
-        
-        driver, already_open = get_or_create_driver(headless=request.headless)
+        # Criar driver próprio para esta requisição
+        driver = create_driver(headless=request.headless)
         wait = WebDriverWait(driver, 20)
         screenshots_dir = os.path.join(os.path.dirname(__file__), "screenshots")
         os.makedirs(screenshots_dir, exist_ok=True)
         
-        # 1. LOGIN - Pular se já estiver logado com a mesma conta
-        need_login = True
+        # 1. LOGIN - Sempre faz login (cada requisição tem seu próprio driver)
+        driver.get("https://cloud.taximachine.com.br/site/login")
+        time.sleep(2)
         
-        # Verificar se já está logado (URL não contém "login")
-        if already_open and driver_logged_in and last_logged_email == request.email:
-            try:
-                current = driver.current_url.lower()
-                if "login" not in current:
-                    need_login = False
-                    print(f"Já está logado como {request.email}, pulando login...")
-            except:
-                pass
-        
-        if need_login:
-            driver.get("https://cloud.taximachine.com.br/site/login")
-            time.sleep(2)
+        # Verificar se realmente precisa logar (pode já estar logado)
+        current_url = driver.current_url.lower()
+        if "login" in current_url:
+            # Tentar diferentes seletores para o campo de email
+            email_field = None
+            email_selectors = [
+                (By.NAME, "LoginForm[username]"),
+                (By.CSS_SELECTOR, "input[type='email']"),
+                (By.CSS_SELECTOR, "input[name='email']"),
+                (By.XPATH, "//input[@placeholder='Email' or contains(@placeholder, 'email')]"),
+                (By.CSS_SELECTOR, "input.form-control[type='text']"),
+            ]
             
-            # Verificar se realmente precisa logar (pode já estar logado)
-            current_url = driver.current_url.lower()
-            if "login" in current_url:
-                # Tentar diferentes seletores para o campo de email
-                email_field = None
-                email_selectors = [
-                    (By.NAME, "LoginForm[username]"),
-                    (By.CSS_SELECTOR, "input[type='email']"),
-                    (By.CSS_SELECTOR, "input[name='email']"),
-                    (By.XPATH, "//input[@placeholder='Email' or contains(@placeholder, 'email')]"),
-                    (By.CSS_SELECTOR, "input.form-control[type='text']"),
+            for by, selector in email_selectors:
+                try:
+                    email_field = wait.until(EC.presence_of_element_located((by, selector)))
+                    if email_field:
+                        break
+                except:
+                    continue
+            
+            if email_field:
+                email_field.clear()
+                email_field.send_keys(request.email)
+                
+                # Campo de senha
+                password_field = None
+                password_selectors = [
+                    (By.NAME, "LoginForm[password]"),
+                    (By.CSS_SELECTOR, "input[type='password']"),
                 ]
                 
-                for by, selector in email_selectors:
+                for by, selector in password_selectors:
                     try:
-                        email_field = wait.until(EC.presence_of_element_located((by, selector)))
-                        if email_field:
+                        password_field = driver.find_element(by, selector)
+                        if password_field:
                             break
                     except:
                         continue
                 
-                if email_field:
-                    email_field.clear()
-                    email_field.send_keys(request.email)
+                if password_field:
+                    password_field.clear()
+                    password_field.send_keys(request.password)
+                    time.sleep(0.5)
                     
-                    # Campo de senha
-                    password_field = None
-                    password_selectors = [
-                        (By.NAME, "LoginForm[password]"),
-                        (By.CSS_SELECTOR, "input[type='password']"),
-                    ]
-                    
-                    for by, selector in password_selectors:
+                    # Clicar no botão de login
+                    login_button = None
+                    for by, selector in [(By.XPATH, "//button[contains(text(), 'Entrar')]"), 
+                                        (By.CSS_SELECTOR, "button[type='submit']")]:
                         try:
-                            password_field = driver.find_element(by, selector)
-                            if password_field:
+                            login_button = driver.find_element(by, selector)
+                            if login_button and login_button.is_displayed():
                                 break
                         except:
                             continue
                     
-                    if password_field:
-                        password_field.clear()
-                        password_field.send_keys(request.password)
-                        time.sleep(0.5)
-                        
-                        # Clicar no botão de login
-                        login_button = None
-                        for by, selector in [(By.XPATH, "//button[contains(text(), 'Entrar')]"), 
-                                            (By.CSS_SELECTOR, "button[type='submit']")]:
+                    if login_button:
+                        driver.execute_script("arguments[0].click();", login_button)
+                    else:
+                        # Fallback: clicar via JavaScript
+                        driver.execute_script("""
+                            var btn = document.querySelector('button[type="submit"]') || 
+                                      document.querySelector('button');
+                            if (btn) btn.click();
+                        """)
+                    
+                    time.sleep(2)
+                    
+                    # Verificar se logou
+                    current_url = driver.current_url.lower()
+                    if "login" in current_url:
+                        # Fechar driver antes de retornar erro
+                        if driver:
                             try:
-                                login_button = driver.find_element(by, selector)
-                                if login_button and login_button.is_displayed():
-                                    break
+                                driver.quit()
                             except:
-                                continue
-                        
-                        if login_button:
-                            driver.execute_script("arguments[0].click();", login_button)
-                        else:
-                            # Fallback: clicar via JavaScript
-                            driver.execute_script("""
-                                var btn = document.querySelector('button[type="submit"]') || 
-                                          document.querySelector('button');
-                                if (btn) btn.click();
-                            """)
-                        
-                        time.sleep(2)
-                        
-                        # Verificar se logou
-                        current_url = driver.current_url.lower()
-                        if "login" in current_url:
-                            return DinamicaResponse(
-                                success=False,
-                                message="Falha no login",
-                                screenshot_path=None
-                            )
-                        
-                        driver_logged_in = True
-                        last_logged_email = request.email
-                        print(f"Login realizado com sucesso como {request.email}!")
+                                pass
+                        with executions_lock:
+                            active_executions -= 1
+                        return DinamicaResponse(
+                            success=False,
+                            message="Falha no login",
+                            screenshot_path=None
+                        )
+                    
+                    print(f"Login realizado com sucesso como {request.email}!")
         
         # 2. NAVEGAR DIRETAMENTE PARA A URL DE TARIFAS DINÂMICAS
         driver.get("https://cloud.taximachine.com.br/tarifaCategoria/dinamica")
@@ -840,9 +772,6 @@ async def atualizar_dinamica(request: DinamicaRequest):
         screenshot_path = os.path.join(screenshots_dir, f"dinamica_sucesso_{int(time.time())}.png")
         driver.save_screenshot(screenshot_path)
         
-        # Navegador permanece aberto para próximas execuções
-        # Não fecha mais automaticamente
-        
         # 8. ENVIAR NOTIFICAÇÃO PARA WEBHOOK N8N
         try:
             webhook_url = "https://n8n-webhook.api.soureino.com/webhook/1e765e17-4e6d-4b12-a2ac-533c0d981c62"
@@ -879,8 +808,14 @@ HORA DA ATUALIZACAO: {hora_atual}"""
         except Exception as webhook_error:
             print(f"Erro ao enviar webhook n8n: {webhook_error}")
         
-        # Liberar lock antes de retornar sucesso
-        is_executing = False
+        # MODO PARALELO: Fechar driver após uso e decrementar contador
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
+        with executions_lock:
+            active_executions -= 1
         gc.collect()  # Forçar coleta de lixo para liberar memória
         
         return DinamicaResponse(
@@ -892,17 +827,22 @@ HORA DA ATUALIZACAO: {hora_atual}"""
         
     except Exception as e:
         screenshot_path = None
-        if global_driver:
+        if driver:
             try:
                 screenshots_dir = os.path.join(os.path.dirname(__file__), "screenshots")
                 os.makedirs(screenshots_dir, exist_ok=True)
                 screenshot_path = os.path.join(screenshots_dir, f"erro_geral_{int(time.time())}.png")
-                global_driver.save_screenshot(screenshot_path)
+                driver.save_screenshot(screenshot_path)
+            except:
+                pass
+            try:
+                driver.quit()
             except:
                 pass
         
-        # Liberar lock em caso de erro
-        is_executing = False
+        # Decrementar contador em caso de erro
+        with executions_lock:
+            active_executions -= 1
         gc.collect()  # Forçar coleta de lixo para liberar memória
         
         return DinamicaResponse(
