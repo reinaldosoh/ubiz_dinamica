@@ -16,8 +16,62 @@ from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 import threading
 import gc
+from supabase import create_client, Client
 
 load_dotenv()
+
+# Configurar Supabase
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+supabase_client: Client = None
+
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print("Supabase conectado com sucesso!")
+    except Exception as e:
+        print(f"Erro ao conectar Supabase: {e}")
+
+def buscar_corridas_stats(cidade_nome: str) -> dict:
+    """Busca estatísticas de corridas dos últimos 15 minutos"""
+    if not supabase_client:
+        return {}
+    
+    try:
+        # Últimos 15 minutos
+        quinze_min_atras = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+        
+        response = supabase_client.table('taximachine_webhooks').select(
+            'request_id, status_code'
+        ).gte(
+            'event_datetime', quinze_min_atras
+        ).eq(
+            'cidade_nome', cidade_nome
+        ).order(
+            'event_datetime', desc=True
+        ).execute()
+        
+        if not response.data:
+            return {}
+        
+        # Agrupar por request_id e pegar status mais recente
+        corridas_unicas = {}
+        for corrida in response.data:
+            rid = corrida.get('request_id')
+            if rid and rid not in corridas_unicas:
+                corridas_unicas[rid] = corrida.get('status_code', '')
+        
+        # Contar por status
+        stats = {'P': 0, 'F': 0, 'C': 0, 'N': 0, 'S': 0, 'A': 0, 'total': 0}
+        for status in corridas_unicas.values():
+            if status in stats:
+                stats[status] += 1
+            stats['total'] += 1
+        
+        return stats
+    except Exception as e:
+        print(f"Erro ao buscar corridas: {e}")
+        return {}
 
 app = FastAPI(title="TaxiMachine Automation API", version="1.0.0")
 
@@ -29,12 +83,81 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MODO PARALELO: Cada requisição cria seu próprio driver (sem fila)
-# Isso pode usar mais memória, mas elimina o delay
+# MODO POOL: Reutiliza drivers por cidade com timeout de 5 minutos
+# Reduz consumo de recursos e tempo de execução (não precisa logar toda vez)
+
+# Pool de drivers por email (cada cidade tem seu próprio driver)
+driver_pool = {}  # {email: {"driver": driver, "last_used": timestamp}}
+pool_lock = threading.Lock()
+DRIVER_TIMEOUT_SECONDS = 300  # 5 minutos de inatividade
 
 # Contador de execuções ativas (apenas para monitoramento)
 active_executions = 0
 executions_lock = threading.Lock()
+
+def cleanup_idle_drivers():
+    """Remove drivers que estão inativos há mais de 5 minutos"""
+    import time
+    with pool_lock:
+        now = time.time()
+        emails_to_remove = []
+        for email, data in driver_pool.items():
+            if now - data["last_used"] > DRIVER_TIMEOUT_SECONDS:
+                try:
+                    data["driver"].quit()
+                    print(f"Driver fechado por inatividade: {email}")
+                except:
+                    pass
+                emails_to_remove.append(email)
+        for email in emails_to_remove:
+            del driver_pool[email]
+
+def get_or_create_driver(email: str, headless: bool = True):
+    """Obtém driver existente do pool ou cria um novo"""
+    import time
+    cleanup_idle_drivers()  # Limpar drivers inativos
+    
+    with pool_lock:
+        if email in driver_pool:
+            driver_data = driver_pool[email]
+            driver = driver_data["driver"]
+            # Verificar se o driver ainda está funcionando
+            try:
+                driver.current_url  # Teste simples
+                driver_data["last_used"] = time.time()
+                print(f"Reutilizando driver existente para: {email}")
+                return driver, False  # False = não é novo
+            except:
+                # Driver morreu, remover do pool
+                try:
+                    driver.quit()
+                except:
+                    pass
+                del driver_pool[email]
+        
+        # Criar novo driver
+        driver = create_driver(headless=headless)
+        driver_pool[email] = {"driver": driver, "last_used": time.time()}
+        print(f"Novo driver criado para: {email}")
+        return driver, True  # True = é novo, precisa logar
+
+def release_driver(email: str):
+    """Atualiza timestamp do driver (mantém no pool)"""
+    import time
+    with pool_lock:
+        if email in driver_pool:
+            driver_pool[email]["last_used"] = time.time()
+
+def force_close_driver(email: str):
+    """Força fechamento do driver (em caso de erro grave)"""
+    with pool_lock:
+        if email in driver_pool:
+            try:
+                driver_pool[email]["driver"].quit()
+            except:
+                pass
+            del driver_pool[email]
+            print(f"Driver forçadamente fechado: {email}")
 
 class LoginCredentials(BaseModel):
     email: str = "reinaldo@painel.com.br"
@@ -213,8 +336,8 @@ async def visual_login():
 @app.post("/dinamica/atualizar", response_model=DinamicaResponse)
 async def atualizar_dinamica(request: DinamicaRequest):
     """
-    MODO PARALELO: Cada requisição cria seu próprio driver Chrome
-    Realiza login, navega até Tarifas Dinâmicas, edita ***Geral manual e salva
+    MODO POOL: Reutiliza driver existente ou cria novo
+    Driver fica aberto por 5 minutos de inatividade
     """
     global active_executions
     
@@ -222,24 +345,30 @@ async def atualizar_dinamica(request: DinamicaRequest):
     with executions_lock:
         active_executions += 1
     
-    print(f"=== INICIANDO AUTOMAÇÃO (Execuções ativas: {active_executions}) ===")
+    print(f"=== INICIANDO AUTOMAÇÃO (Execuções ativas: {active_executions}, Pool: {len(driver_pool)}) ===")
     print(f"Email recebido: {request.email}")
     print(f"Multiplicador: {request.multiplicador}")
     print(f"Headless: {request.headless}")
     
     driver = None
+    is_new_driver = True
     try:
-        # Criar driver próprio para esta requisição
-        driver = create_driver(headless=request.headless)
+        # Obter driver do pool ou criar novo
+        driver, is_new_driver = get_or_create_driver(request.email, headless=request.headless)
         wait = WebDriverWait(driver, 20)
         screenshots_dir = os.path.join(os.path.dirname(__file__), "screenshots")
         os.makedirs(screenshots_dir, exist_ok=True)
         
-        # 1. LOGIN - Sempre faz login (cada requisição tem seu próprio driver)
-        driver.get("https://cloud.taximachine.com.br/site/login")
-        time.sleep(2)
+        # 1. LOGIN - Só faz login se for driver novo ou se não estiver logado
+        if is_new_driver:
+            driver.get("https://cloud.taximachine.com.br/site/login")
+            time.sleep(1)  # OTIMIZADO: 2s -> 1s
+        else:
+            # Driver existente - verificar se ainda está logado
+            driver.get("https://cloud.taximachine.com.br/tarifaCategoria/dinamica")
+            time.sleep(1)  # OTIMIZADO: 2s -> 1s
         
-        # Verificar se realmente precisa logar (pode já estar logado)
+        # Verificar se precisa logar
         current_url = driver.current_url.lower()
         if "login" in current_url:
             # Tentar diferentes seletores para o campo de email
@@ -305,7 +434,7 @@ async def atualizar_dinamica(request: DinamicaRequest):
                             if (btn) btn.click();
                         """)
                     
-                    time.sleep(2)
+                    time.sleep(1)  # OTIMIZADO: 2s -> 1s
                     
                     # Verificar se logou
                     current_url = driver.current_url.lower()
@@ -328,7 +457,7 @@ async def atualizar_dinamica(request: DinamicaRequest):
         
         # 2. NAVEGAR DIRETAMENTE PARA A URL DE TARIFAS DINÂMICAS
         driver.get("https://cloud.taximachine.com.br/tarifaCategoria/dinamica")
-        time.sleep(2)
+        time.sleep(1)  # OTIMIZADO: 2s -> 1s
         
         from selenium.webdriver.common.keys import Keys
         from selenium.webdriver.common.action_chains import ActionChains
@@ -386,11 +515,11 @@ async def atualizar_dinamica(request: DinamicaRequest):
                 el.remove();
             });
         """)
-        time.sleep(0.5)
+        time.sleep(0.2)  # OTIMIZADO: 0.5s -> 0.2s
         
         # Pressionar ESC uma vez
         ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-        time.sleep(0.2)
+        time.sleep(0.1)  # OTIMIZADO: 0.2s -> 0.1s
         
         # 3. CLICAR NA ABA "MANUAIS" via JavaScript (RÁPIDO)
         driver.execute_script("""
@@ -402,10 +531,53 @@ async def atualizar_dinamica(request: DinamicaRequest):
                 }
             });
         """)
-        time.sleep(1)
+        time.sleep(0.5)  # OTIMIZADO: 1s -> 0.5s
+        
+        # 3.5. DIGITAR "***Geral" NO CAMPO DE BUSCA para filtrar o card correto
+        search_result = driver.execute_script("""
+            // Encontrar o campo de busca (input com placeholder de busca ou ícone de lupa)
+            var searchInput = null;
+            var inputs = document.querySelectorAll('input');
+            
+            for (var i = 0; i < inputs.length; i++) {
+                var inp = inputs[i];
+                var rect = inp.getBoundingClientRect();
+                var placeholder = (inp.placeholder || '').toLowerCase();
+                var type = inp.type || 'text';
+                
+                // Ignorar inputs invisíveis
+                if (rect.width <= 0 || rect.height <= 0) continue;
+                if (type === 'hidden' || type === 'checkbox' || type === 'radio' || type === 'number') continue;
+                
+                // Campo de busca geralmente tem placeholder ou está no topo
+                if (placeholder.includes('busca') || placeholder.includes('pesquis') || 
+                    placeholder.includes('search') || placeholder.includes('filtro') ||
+                    rect.top < 400) {
+                    searchInput = inp;
+                    break;
+                }
+            }
+            
+            if (searchInput) {
+                // Limpar e digitar ***Geral
+                searchInput.focus();
+                searchInput.value = '***Geral';
+                
+                // Disparar eventos
+                var inputEvent = new Event('input', { bubbles: true });
+                searchInput.dispatchEvent(inputEvent);
+                var changeEvent = new Event('change', { bubbles: true });
+                searchInput.dispatchEvent(changeEvent);
+                
+                return 'busca_preenchida';
+            }
+            return 'campo_busca_nao_encontrado';
+        """)
+        print(f"Campo de busca: {search_result}")
+        time.sleep(0.5)  # OTIMIZADO: 1s -> 0.5s
         
         # 4. ENCONTRAR CARD DE DINÂMICA E CLICAR NOS 3 PONTOS
-        # Estratégia: procurar por cards que contenham "manual" ou "Geral" na aba Manuais
+        # Agora o card "***Geral Manual" deve estar visível após a busca
         
         click_result = driver.execute_script("""
             // Estratégia 1: Procurar por cards com texto "manual" ou "Geral"
@@ -516,25 +688,73 @@ async def atualizar_dinamica(request: DinamicaRequest):
         except Exception as e:
             print(f"Erro ao clicar em Editar: {e}")
         
-        time.sleep(1.5)  # Aguardar página de edição carregar
+        time.sleep(0.8)  # OTIMIZADO: 1.5s -> 0.8s
         
         # 5. ALTERAR O FATOR MULTIPLICADOR
         # Usar Selenium para encontrar o input e simular digitação real
         
-        # Encontrar o segundo input visível (multiplicador)
+        # Encontrar o input do multiplicador (tipo number ou com valor numérico decimal)
         mult_input = driver.execute_script("""
             var inputs = document.querySelectorAll('input');
-            var visibleInputs = [];
+            var multiplicadorInput = null;
+            
             for (var i = 0; i < inputs.length; i++) {
                 var inp = inputs[i];
                 var rect = inp.getBoundingClientRect();
                 var type = inp.type || 'text';
-                if (rect.width > 0 && rect.height > 0 && type !== 'hidden' && type !== 'checkbox' && type !== 'radio') {
-                    visibleInputs.push(inp);
+                var value = inp.value || '';
+                var placeholder = inp.placeholder || '';
+                var name = inp.name || '';
+                
+                // Ignorar inputs invisíveis ou especiais
+                if (rect.width <= 0 || rect.height <= 0) continue;
+                if (type === 'hidden' || type === 'checkbox' || type === 'radio') continue;
+                
+                // Estratégia 1: Input do tipo number
+                if (type === 'number') {
+                    multiplicadorInput = inp;
+                    console.log('Encontrou input type=number');
+                    break;
+                }
+                
+                // Estratégia 2: Valor parece ser um multiplicador (1.0 a 3.0)
+                var numValue = parseFloat(value);
+                if (!isNaN(numValue) && numValue >= 1.0 && numValue <= 3.0 && value.includes('.')) {
+                    multiplicadorInput = inp;
+                    console.log('Encontrou input com valor multiplicador:', value);
+                    break;
+                }
+                
+                // Estratégia 3: Placeholder ou name contém "multiplicador" ou "fator"
+                var lowerPlaceholder = placeholder.toLowerCase();
+                var lowerName = name.toLowerCase();
+                if (lowerPlaceholder.includes('multiplicador') || lowerPlaceholder.includes('fator') ||
+                    lowerName.includes('multiplicador') || lowerName.includes('fator')) {
+                    multiplicadorInput = inp;
+                    console.log('Encontrou input por placeholder/name');
+                    break;
                 }
             }
-            // Retornar o segundo input (multiplicador)
-            return visibleInputs.length >= 2 ? visibleInputs[1] : (visibleInputs[0] || null);
+            
+            // Fallback: pegar o segundo input visível que não seja o nome
+            if (!multiplicadorInput) {
+                var visibleInputs = [];
+                for (var j = 0; j < inputs.length; j++) {
+                    var inp2 = inputs[j];
+                    var rect2 = inp2.getBoundingClientRect();
+                    var type2 = inp2.type || 'text';
+                    if (rect2.width > 0 && rect2.height > 0 && type2 !== 'hidden' && type2 !== 'checkbox' && type2 !== 'radio') {
+                        visibleInputs.push(inp2);
+                    }
+                }
+                // O segundo input geralmente é o multiplicador
+                if (visibleInputs.length >= 2) {
+                    multiplicadorInput = visibleInputs[1];
+                    console.log('Usando fallback: segundo input visível');
+                }
+            }
+            
+            return multiplicadorInput;
         """)
         
         if mult_input:
@@ -581,6 +801,42 @@ async def atualizar_dinamica(request: DinamicaRequest):
         
         time.sleep(0.5)
         
+        # 5.5. VERIFICAR TOGGLE NA TELA DE EDIÇÃO - SÓ ATIVAR SE ESTIVER INATIVO
+        toggle_ativado = driver.execute_script("""
+            // Procurar toggle/switch na tela de edição
+            var switches = document.querySelectorAll('[role="switch"], [data-state], input[type="checkbox"]');
+            console.log('Switches encontrados na tela de edição:', switches.length);
+            
+            for (var i = 0; i < switches.length; i++) {
+                var sw = switches[i];
+                var rect = sw.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) continue;
+                
+                var ariaChecked = sw.getAttribute('aria-checked');
+                var dataState = sw.getAttribute('data-state');
+                var isChecked = sw.checked;
+                
+                console.log('Toggle edição - aria-checked:', ariaChecked, 'data-state:', dataState, 'checked:', isChecked);
+                
+                // SE JÁ ESTÁ ATIVO, NÃO FAZER NADA
+                if (ariaChecked === 'true' || dataState === 'checked' || dataState === 'on' || isChecked === true) {
+                    console.log('Toggle na edição JÁ ESTÁ ATIVO - NÃO CLICAR');
+                    return 'ja_ativo';
+                }
+                
+                // SE ESTÁ INATIVO, ATIVAR
+                if (ariaChecked === 'false' || dataState === 'unchecked' || dataState === 'off' || isChecked === false) {
+                    console.log('Toggle na edição INATIVO - CLICANDO PARA ATIVAR');
+                    sw.click();
+                    return 'ativado';
+                }
+            }
+            return 'nao_encontrado';
+        """)
+        print(f"Toggle na edição: {toggle_ativado}")
+        
+        time.sleep(0.3)
+        
         # 6. SALVAR ALTERAÇÕES - Encontrar e clicar no botão
         try:
             salvar_btn = driver.find_element(By.XPATH, "//button[contains(text(), 'Salvar')]")
@@ -596,7 +852,7 @@ async def atualizar_dinamica(request: DinamicaRequest):
                 });
             """)
         
-        time.sleep(2)
+        time.sleep(1)  # OTIMIZADO: 2s -> 1s
         
         # 7. ENVIAR NOTIFICAÇÃO PARA WEBHOOK N8N (logo após salvar)
         try:
@@ -611,11 +867,31 @@ async def atualizar_dinamica(request: DinamicaRequest):
             # Log para debug
             print(f"Webhook - Cidade: {request.cidade}, Estado: {request.estado}")
             
+            # Buscar estatísticas de corridas dos últimos 15 minutos
+            stats = buscar_corridas_stats(request.cidade)
+            total_corridas = stats.get('total', 0)
+            canceladas = stats.get('C', 0)
+            pendentes = stats.get('P', 0)
+            finalizadas = stats.get('F', 0)
+            aceitas = stats.get('A', 0)
+            em_espera = stats.get('S', 0)
+            nao_atendidas = stats.get('N', 0)
+            
             mensagem = f"""CIDADE: {request.cidade}
 ESTADO: {request.estado}
 DINAMICA ALTERADA PARA: {request.multiplicador}
 DIA DA ATUALIZACAO: {data_atual}
-HORA DA ATUALIZACAO: {hora_atual}"""
+HORA DA ATUALIZACAO: {hora_atual}
+
+Status atual: {hora_atual}
+
+🚨 Corridas solicitadas (últimos 15 min): {total_corridas}
+🚨 Canceladas: {canceladas}
+🚨 Pendentes: {pendentes}
+🚨 Não Atendidas: {nao_atendidas}
+✅ Finalizadas: {finalizadas}
+✅ Aceitas: {aceitas}
+✅ Em Espera: {em_espera}"""
             
             # Adicionar OBS de teste apenas se is_test=True
             if request.is_test:
@@ -631,12 +907,11 @@ HORA DA ATUALIZACAO: {hora_atual}"""
         except Exception as webhook_error:
             print(f"Erro ao enviar webhook n8n: {webhook_error}")
         
-        # 8. ATIVAR A DINÂMICA - Clicar no toggle APENAS se não estiver ativo
-        # Baseado no screenshot: o toggle está no header do card, ao lado do valor "1.2x"
+        # 8. ATIVAR A DINÂMICA - Voltar para lista, buscar ***Geral e ativar toggle
         
-        # Primeiro, navegar de volta para a lista de dinâmicas (caso ainda esteja na tela de edição)
+        # Navegar de volta para a lista de dinâmicas
         driver.get("https://cloud.taximachine.com.br/tarifaCategoria/dinamica")
-        time.sleep(3)  # Aumentado para dar tempo de carregar no Render
+        time.sleep(1.5)  # OTIMIZADO: 3s -> 1.5s
         
         # Clicar na aba Manuais
         driver.execute_script("""
@@ -646,7 +921,26 @@ HORA DA ATUALIZACAO: {hora_atual}"""
                 }
             });
         """)
-        time.sleep(2)  # Aumentado para Render
+        time.sleep(0.5)  # OTIMIZADO: 1s -> 0.5s
+        
+        # Buscar ***Geral novamente para encontrar o card
+        driver.execute_script("""
+            var inputs = document.querySelectorAll('input');
+            for (var i = 0; i < inputs.length; i++) {
+                var inp = inputs[i];
+                var rect = inp.getBoundingClientRect();
+                var type = inp.type || 'text';
+                if (rect.width > 0 && rect.height > 0 && type !== 'hidden' && type !== 'checkbox' && type !== 'radio' && type !== 'number') {
+                    inp.focus();
+                    inp.value = '***Geral';
+                    inp.dispatchEvent(new Event('input', { bubbles: true }));
+                    inp.dispatchEvent(new Event('change', { bubbles: true }));
+                    break;
+                }
+            }
+        """)
+        print("Buscou ***Geral para ativar toggle")
+        time.sleep(1)  # OTIMIZADO: 2s -> 1s
         
         # FECHAR MODAL SE ESTIVER ABERTO (modal "Dinâmica automática")
         driver.execute_script("""
@@ -675,150 +969,91 @@ HORA DA ATUALIZACAO: {hora_atual}"""
         """)
         time.sleep(0.5)
         
-        # Encontrar e clicar no toggle do card "Geral manual"
-        # O toggle está ao lado do texto "Dinâmica" dentro do card
+        # Encontrar e verificar o toggle do card ***Geral Manual
+        # IMPORTANTE: Só clicar se estiver INATIVO. Se já estiver ativo, NÃO FAZER NADA.
         
-        # Estratégia mais robusta: buscar em toda a página por toggles/switches
         toggle_result = driver.execute_script("""
-            console.log('=== BUSCANDO TOGGLE GERAL MANUAL (ESTRATÉGIA ROBUSTA) ===');
+            console.log('=== VERIFICANDO TOGGLE ***GERAL MANUAL ===');
             
-            // Estratégia 0: Buscar TODOS os switches/toggles na página primeiro
-            var allSwitches = document.querySelectorAll('[class*="switch"], [class*="Switch"], [role="switch"], input[type="checkbox"]');
-            console.log('Total de switches na página:', allSwitches.length);
+            // Procurar por elementos com role="switch" ou data-state (padrão comum de toggles)
+            var switches = document.querySelectorAll('[role="switch"], [data-state], input[type="checkbox"]');
+            console.log('Switches encontrados:', switches.length);
             
-            // Procurar o card "Geral manual" com critérios mais flexíveis
-            var allDivs = document.querySelectorAll('div');
-            var targetCard = null;
-            
-            for (var i = 0; i < allDivs.length; i++) {
-                var div = allDivs[i];
-                var text = div.innerText || '';
-                var rect = div.getBoundingClientRect();
-                
-                // Card deve conter "Geral manual" - critérios de tamanho mais flexíveis
-                if (text.includes('Geral manual') && 
-                    rect.width > 80 && rect.width < 400 && 
-                    rect.height > 50 && rect.height < 300) {
-                    targetCard = div;
-                    console.log('Card Geral manual encontrado:', rect.width, 'x', rect.height);
-                    break;
-                }
-            }
-            
-            if (!targetCard) {
-                // Fallback: procurar apenas pelo texto "Geral manual"
-                var allElements = document.querySelectorAll('*');
-                for (var i = 0; i < allElements.length; i++) {
-                    var el = allElements[i];
-                    if ((el.innerText || '').includes('Geral manual')) {
-                        // Subir na árvore DOM para encontrar o card pai
-                        var parent = el;
-                        for (var j = 0; j < 5; j++) {
-                            parent = parent.parentElement;
-                            if (!parent) break;
-                            var rect = parent.getBoundingClientRect();
-                            if (rect.width > 100 && rect.height > 80) {
-                                targetCard = parent;
-                                console.log('Card encontrado via fallback:', rect.width, 'x', rect.height);
-                                break;
-                            }
-                        }
-                        if (targetCard) break;
-                    }
-                }
-            }
-            
-            if (!targetCard) {
-                return 'card_geral_manual_not_found';
-            }
-            
-            // Estratégia 1: Procurar por classe que contenha switch/toggle dentro do card
-            var switchElements = targetCard.querySelectorAll('[class*="switch"], [class*="Switch"], [class*="toggle"], [class*="Toggle"]');
-            console.log('Elementos switch/toggle no card:', switchElements.length);
-            
-            for (var j = 0; j < switchElements.length; j++) {
-                var sw = switchElements[j];
+            for (var i = 0; i < switches.length; i++) {
+                var sw = switches[i];
                 var rect = sw.getBoundingClientRect();
-                if (rect.width > 0 && rect.height > 0) {
+                
+                // Ignorar elementos invisíveis
+                if (rect.width <= 0 || rect.height <= 0) continue;
+                if (rect.top < 300) continue; // Ignorar elementos no topo (header)
+                
+                var ariaChecked = sw.getAttribute('aria-checked');
+                var dataState = sw.getAttribute('data-state');
+                var isChecked = sw.checked;
+                
+                console.log('Switch encontrado - aria-checked:', ariaChecked, 'data-state:', dataState, 'checked:', isChecked);
+                
+                // VERIFICAR SE JÁ ESTÁ ATIVO - SE SIM, NÃO FAZER NADA
+                if (ariaChecked === 'true' || dataState === 'checked' || dataState === 'on' || isChecked === true) {
+                    console.log('>>> TOGGLE JÁ ESTÁ ATIVO - NÃO CLICAR');
+                    return 'toggle_ja_ativo';
+                }
+                
+                // Se está INATIVO, ativar
+                if (ariaChecked === 'false' || dataState === 'unchecked' || dataState === 'off' || isChecked === false) {
+                    console.log('>>> TOGGLE INATIVO - CLICANDO PARA ATIVAR');
                     sw.click();
-                    console.log('Clicou em switch:', sw.className);
-                    return 'clicked_switch_class: ' + sw.className;
+                    return 'toggle_ativado';
                 }
             }
             
-            // Estratégia 2: Procurar input checkbox
-            var checkboxes = targetCard.querySelectorAll('input[type="checkbox"]');
-            console.log('Checkboxes encontrados:', checkboxes.length);
+            // Fallback: Procurar por elementos visuais que parecem toggles
+            var allElements = document.querySelectorAll('button, div, span');
             
-            for (var k = 0; k < checkboxes.length; k++) {
-                var cb = checkboxes[k];
-                cb.click();
-                console.log('Clicou em checkbox');
-                return 'clicked_checkbox';
-            }
-            
-            // Estratégia 3: Procurar elemento com role="switch"
-            var roleSwitches = targetCard.querySelectorAll('[role="switch"]');
-            if (roleSwitches.length > 0) {
-                roleSwitches[0].click();
-                return 'clicked_role_switch';
-            }
-            
-            // Estratégia 4: Procurar botão dentro do card que possa ser o toggle
-            var buttons = targetCard.querySelectorAll('button');
-            console.log('Botões no card:', buttons.length);
-            for (var b = 0; b < buttons.length; b++) {
-                var btn = buttons[b];
-                var rect = btn.getBoundingClientRect();
-                // Toggle geralmente é pequeno
-                if (rect.width < 80 && rect.height < 40) {
-                    btn.click();
-                    console.log('Clicou em botão pequeno:', rect.width, 'x', rect.height);
-                    return 'clicked_small_button';
-                }
-            }
-            
-            // Estratégia 5: Procurar por elemento pequeno e arredondado
-            var allCardElements = targetCard.querySelectorAll('*');
-            for (var n = 0; n < allCardElements.length; n++) {
-                var el = allCardElements[n];
+            for (var j = 0; j < allElements.length; j++) {
+                var el = allElements[j];
                 var rect = el.getBoundingClientRect();
                 var style = window.getComputedStyle(el);
-                var borderRadius = style.borderRadius;
                 var bgColor = style.backgroundColor;
+                var borderRadius = style.borderRadius;
                 
-                // Elemento pequeno e arredondado com cor de fundo
-                if (rect.width >= 15 && rect.width <= 60 && 
-                    rect.height >= 10 && rect.height <= 35 &&
-                    bgColor !== 'rgba(0, 0, 0, 0)' && bgColor !== 'transparent') {
-                    el.click();
-                    console.log('Clicou em elemento arredondado colorido:', el.tagName, rect.width, 'x', rect.height, bgColor);
-                    return 'clicked_colored_element';
-                }
-            }
-            
-            // Estratégia 6: Clicar no primeiro elemento clicável após "Dinâmica"
-            var dinamicaFound = false;
-            for (var m = 0; m < allCardElements.length; m++) {
-                var el = allCardElements[m];
-                var text = (el.innerText || '').trim();
-                
-                if (text === 'Dinâmica' || text.includes('Dinâmica')) {
-                    dinamicaFound = true;
-                    continue;
-                }
-                
-                if (dinamicaFound) {
-                    var rect = el.getBoundingClientRect();
-                    if (rect.width > 0 && rect.height > 0 && rect.width < 100) {
-                        el.click();
-                        console.log('Clicou após Dinâmica:', el.tagName);
-                        return 'clicked_after_dinamica';
+                // Toggle típico: largura 30-50px, altura 15-30px, borda arredondada
+                if (rect.width >= 30 && rect.width <= 60 && 
+                    rect.height >= 15 && rect.height <= 35 &&
+                    rect.top > 300 &&
+                    borderRadius && parseInt(borderRadius) >= 8) {
+                    
+                    // Verificar cor de fundo para determinar estado
+                    var rgbMatch = bgColor.match(/rgb[a]?\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/);
+                    if (rgbMatch) {
+                        var r = parseInt(rgbMatch[1]);
+                        var g = parseInt(rgbMatch[2]);
+                        var b = parseInt(rgbMatch[3]);
+                        
+                        console.log('Toggle visual encontrado - RGB:', r, g, b);
+                        
+                        // VERDE ou AZUL = ATIVO - NÃO CLICAR
+                        // Verde: g > 100 e g > r
+                        // Azul: b > 100 e b > r e b > g
+                        if ((g > 100 && g > r) || (b > 100 && b > r && b > g)) {
+                            console.log('>>> TOGGLE COLORIDO (ativo) - NÃO CLICAR');
+                            return 'toggle_ja_ativo_cor';
+                        }
+                        
+                        // CINZA = INATIVO - CLICAR
+                        // Cinza: r, g, b são próximos (diferença < 30)
+                        var maxDiff = Math.max(Math.abs(r-g), Math.abs(g-b), Math.abs(r-b));
+                        if (maxDiff < 40 && r < 200) {
+                            console.log('>>> TOGGLE CINZA (inativo) - CLICANDO PARA ATIVAR');
+                            el.click();
+                            return 'toggle_ativado';
+                        }
                     }
                 }
             }
             
-            return 'toggle_not_found';
+            console.log('Nenhum toggle encontrado ou não foi possível determinar estado');
+            return 'toggle_nao_encontrado_ou_indeterminado';
         """)
         
         print(f"Toggle resultado: {toggle_result}")
@@ -828,15 +1063,12 @@ HORA DA ATUALIZACAO: {hora_atual}"""
         screenshot_path = os.path.join(screenshots_dir, f"dinamica_sucesso_{int(time.time())}.png")
         driver.save_screenshot(screenshot_path)
         
-        # MODO PARALELO: Fechar driver após uso e decrementar contador
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
+        # MODO POOL: Manter driver no pool (não fechar)
+        # Driver será fechado automaticamente após 5 min de inatividade
+        release_driver(request.email)
+        
         with executions_lock:
             active_executions -= 1
-        gc.collect()  # Forçar coleta de lixo para liberar memória
         
         return DinamicaResponse(
             success=True,
@@ -847,6 +1079,7 @@ HORA DA ATUALIZACAO: {hora_atual}"""
         
     except Exception as e:
         screenshot_path = None
+        # Em caso de erro, forçar fechamento do driver
         if driver:
             try:
                 screenshots_dir = os.path.join(os.path.dirname(__file__), "screenshots")
@@ -855,15 +1088,12 @@ HORA DA ATUALIZACAO: {hora_atual}"""
                 driver.save_screenshot(screenshot_path)
             except:
                 pass
-            try:
-                driver.quit()
-            except:
-                pass
+        # Forçar fechamento do driver em caso de erro
+        force_close_driver(request.email)
         
-        # Decrementar contador em caso de erro
         with executions_lock:
             active_executions -= 1
-        gc.collect()  # Forçar coleta de lixo para liberar memória
+        gc.collect()
         
         return DinamicaResponse(
             success=False,
