@@ -45,8 +45,7 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
-# Health check com mais tempo de start
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+# Sem health check para evitar problemas no EasyPanel
+# O EasyPanel tem seu próprio sistema de health check
 
 CMD ["python", "main.py"]
