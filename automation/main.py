@@ -19,6 +19,60 @@ import gc
 
 load_dotenv()
 
+# Configuração Supabase via REST API (fallback se corridas_stats não for passado)
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+
+def buscar_corridas_stats_fallback(cidade_nome: str) -> dict:
+    """Busca estatísticas de corridas via REST API (fallback)"""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        print("Supabase não configurado")
+        return None
+    
+    try:
+        quinze_min_atras = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+        
+        url = f"{SUPABASE_URL}/rest/v1/taximachine_webhooks"
+        params = f"select=request_id,status_code&event_datetime=gte.{quinze_min_atras}&cidade_nome=eq.{cidade_nome}&order=event_datetime.desc"
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}"
+        }
+        
+        response = requests.get(f"{url}?{params}", headers=headers, timeout=5)
+        
+        if response.status_code != 200:
+            print(f"Erro Supabase: {response.status_code}")
+            return None
+        
+        data = response.json()
+        if not data:
+            return {'total': 0, 'pendentes': 0, 'finalizadas': 0, 'canceladas': 0, 'nao_atendidas': 0, 'aceitas': 0, 'em_espera': 0}
+        
+        # Agrupar por request_id
+        corridas_unicas = {}
+        for corrida in data:
+            rid = corrida.get('request_id')
+            if rid and rid not in corridas_unicas:
+                corridas_unicas[rid] = corrida.get('status_code', '')
+        
+        # Contar por status
+        stats = {'total': 0, 'pendentes': 0, 'finalizadas': 0, 'canceladas': 0, 'nao_atendidas': 0, 'aceitas': 0, 'em_espera': 0}
+        for status in corridas_unicas.values():
+            stats['total'] += 1
+            if status == 'P': stats['pendentes'] += 1
+            elif status == 'F': stats['finalizadas'] += 1
+            elif status == 'C': stats['canceladas'] += 1
+            elif status == 'N': stats['nao_atendidas'] += 1
+            elif status == 'A': stats['aceitas'] += 1
+            elif status == 'S': stats['em_espera'] += 1
+        
+        print(f"Stats corridas {cidade_nome}: {stats}")
+        return stats
+    except Exception as e:
+        print(f"Erro ao buscar corridas: {e}")
+        return None
+
 app = FastAPI(title="TaxiMachine Automation API", version="1.0.0")
 
 app.add_middleware(
@@ -823,15 +877,29 @@ async def atualizar_dinamica(request: DinamicaRequest):
             # Log para debug
             print(f"Webhook - Cidade: {request.cidade}, Estado: {request.estado}")
             
-            # Usar estatísticas passadas como parâmetro (se disponíveis)
+            # Usar estatísticas passadas como parâmetro OU buscar via fallback
             stats = request.corridas_stats
-            total_corridas = stats.total if stats else 0
-            canceladas = stats.canceladas if stats else 0
-            pendentes = stats.pendentes if stats else 0
-            finalizadas = stats.finalizadas if stats else 0
-            aceitas = stats.aceitas if stats else 0
-            em_espera = stats.em_espera if stats else 0
-            nao_atendidas = stats.nao_atendidas if stats else 0
+            if not stats:
+                # Fallback: buscar do Supabase se não foi passado
+                fallback_stats = buscar_corridas_stats_fallback(request.cidade)
+                if fallback_stats:
+                    total_corridas = fallback_stats.get('total', 0)
+                    canceladas = fallback_stats.get('canceladas', 0)
+                    pendentes = fallback_stats.get('pendentes', 0)
+                    finalizadas = fallback_stats.get('finalizadas', 0)
+                    aceitas = fallback_stats.get('aceitas', 0)
+                    em_espera = fallback_stats.get('em_espera', 0)
+                    nao_atendidas = fallback_stats.get('nao_atendidas', 0)
+                else:
+                    total_corridas = canceladas = pendentes = finalizadas = aceitas = em_espera = nao_atendidas = 0
+            else:
+                total_corridas = stats.total
+                canceladas = stats.canceladas
+                pendentes = stats.pendentes
+                finalizadas = stats.finalizadas
+                aceitas = stats.aceitas
+                em_espera = stats.em_espera
+                nao_atendidas = stats.nao_atendidas
             
             mensagem = f"""CIDADE: {request.cidade}
 ESTADO: {request.estado}
