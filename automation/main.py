@@ -811,11 +811,17 @@ async def atualizar_dinamica(request: DinamicaRequest):
         
         time.sleep(0.5)
         
-        # 5.5. VERIFICAR TOGGLE NA TELA DE EDIÇÃO - SÓ ATIVAR SE ESTIVER INATIVO
+        # 5.5. VERIFICAR TOGGLE NA TELA DE EDIÇÃO
+        # Se multiplicador for 1.0 ou 1.1 -> DESATIVAR toggle
+        # Caso contrário -> ATIVAR toggle
+        deve_desativar = request.multiplicador <= 1.1
+        
         toggle_ativado = driver.execute_script("""
+            var deveDesativar = arguments[0];
             // Procurar toggle/switch na tela de edição
             var switches = document.querySelectorAll('[role="switch"], [data-state], input[type="checkbox"]');
             console.log('Switches encontrados na tela de edição:', switches.length);
+            console.log('Deve desativar (mult <= 1.1):', deveDesativar);
             
             for (var i = 0; i < switches.length; i++) {
                 var sw = switches[i];
@@ -825,25 +831,35 @@ async def atualizar_dinamica(request: DinamicaRequest):
                 var ariaChecked = sw.getAttribute('aria-checked');
                 var dataState = sw.getAttribute('data-state');
                 var isChecked = sw.checked;
+                var estaAtivo = ariaChecked === 'true' || dataState === 'checked' || dataState === 'on' || isChecked === true;
                 
-                console.log('Toggle edição - aria-checked:', ariaChecked, 'data-state:', dataState, 'checked:', isChecked);
+                console.log('Toggle edição - aria-checked:', ariaChecked, 'data-state:', dataState, 'checked:', isChecked, 'estaAtivo:', estaAtivo);
                 
-                // SE JÁ ESTÁ ATIVO, NÃO FAZER NADA
-                if (ariaChecked === 'true' || dataState === 'checked' || dataState === 'on' || isChecked === true) {
-                    console.log('Toggle na edição JÁ ESTÁ ATIVO - NÃO CLICAR');
-                    return 'ja_ativo';
-                }
-                
-                // SE ESTÁ INATIVO, ATIVAR
-                if (ariaChecked === 'false' || dataState === 'unchecked' || dataState === 'off' || isChecked === false) {
-                    console.log('Toggle na edição INATIVO - CLICANDO PARA ATIVAR');
-                    sw.click();
-                    return 'ativado';
+                if (deveDesativar) {
+                    // MULTIPLICADOR 1.0 ou 1.1: Queremos DESATIVAR
+                    if (estaAtivo) {
+                        console.log('Toggle na edição ATIVO - CLICANDO PARA DESATIVAR (mult <= 1.1)');
+                        sw.click();
+                        return 'desativado';
+                    } else {
+                        console.log('Toggle na edição JÁ ESTÁ INATIVO - NÃO CLICAR');
+                        return 'ja_inativo';
+                    }
+                } else {
+                    // MULTIPLICADOR > 1.1: Queremos ATIVAR
+                    if (estaAtivo) {
+                        console.log('Toggle na edição JÁ ESTÁ ATIVO - NÃO CLICAR');
+                        return 'ja_ativo';
+                    } else {
+                        console.log('Toggle na edição INATIVO - CLICANDO PARA ATIVAR');
+                        sw.click();
+                        return 'ativado';
+                    }
                 }
             }
             return 'nao_encontrado';
-        """)
-        print(f"Toggle na edição: {toggle_ativado}")
+        """, deve_desativar)
+        print(f"Toggle na edição: {toggle_ativado} (deve_desativar={deve_desativar})")
         
         time.sleep(0.3)
         
@@ -994,10 +1010,13 @@ Status atual: {hora_atual}
         time.sleep(0.5)
         
         # Encontrar e verificar o toggle do card ***Geral Manual
-        # IMPORTANTE: Só clicar se estiver INATIVO. Se já estiver ativo, NÃO FAZER NADA.
+        # Se multiplicador <= 1.1 -> DESATIVAR toggle
+        # Caso contrário -> ATIVAR toggle
         
         toggle_result = driver.execute_script("""
+            var deveDesativar = arguments[0];
             console.log('=== VERIFICANDO TOGGLE ***GERAL MANUAL ===');
+            console.log('Deve desativar (mult <= 1.1):', deveDesativar);
             
             // Procurar por elementos com role="switch" ou data-state (padrão comum de toggles)
             var switches = document.querySelectorAll('[role="switch"], [data-state], input[type="checkbox"]');
@@ -1014,20 +1033,30 @@ Status atual: {hora_atual}
                 var ariaChecked = sw.getAttribute('aria-checked');
                 var dataState = sw.getAttribute('data-state');
                 var isChecked = sw.checked;
+                var estaAtivo = ariaChecked === 'true' || dataState === 'checked' || dataState === 'on' || isChecked === true;
                 
-                console.log('Switch encontrado - aria-checked:', ariaChecked, 'data-state:', dataState, 'checked:', isChecked);
+                console.log('Switch encontrado - aria-checked:', ariaChecked, 'data-state:', dataState, 'checked:', isChecked, 'estaAtivo:', estaAtivo);
                 
-                // VERIFICAR SE JÁ ESTÁ ATIVO - SE SIM, NÃO FAZER NADA
-                if (ariaChecked === 'true' || dataState === 'checked' || dataState === 'on' || isChecked === true) {
-                    console.log('>>> TOGGLE JÁ ESTÁ ATIVO - NÃO CLICAR');
-                    return 'toggle_ja_ativo';
-                }
-                
-                // Se está INATIVO, ativar
-                if (ariaChecked === 'false' || dataState === 'unchecked' || dataState === 'off' || isChecked === false) {
-                    console.log('>>> TOGGLE INATIVO - CLICANDO PARA ATIVAR');
-                    sw.click();
-                    return 'toggle_ativado';
+                if (deveDesativar) {
+                    // MULTIPLICADOR 1.0 ou 1.1: Queremos DESATIVAR
+                    if (estaAtivo) {
+                        console.log('>>> TOGGLE ATIVO - CLICANDO PARA DESATIVAR (mult <= 1.1)');
+                        sw.click();
+                        return 'toggle_desativado';
+                    } else {
+                        console.log('>>> TOGGLE JÁ ESTÁ INATIVO - NÃO CLICAR');
+                        return 'toggle_ja_inativo';
+                    }
+                } else {
+                    // MULTIPLICADOR > 1.1: Queremos ATIVAR
+                    if (estaAtivo) {
+                        console.log('>>> TOGGLE JÁ ESTÁ ATIVO - NÃO CLICAR');
+                        return 'toggle_ja_ativo';
+                    } else {
+                        console.log('>>> TOGGLE INATIVO - CLICANDO PARA ATIVAR');
+                        sw.click();
+                        return 'toggle_ativado';
+                    }
                 }
             }
             
@@ -1056,21 +1085,32 @@ Status atual: {hora_atual}
                         
                         console.log('Toggle visual encontrado - RGB:', r, g, b);
                         
-                        // VERDE ou AZUL = ATIVO - NÃO CLICAR
-                        // Verde: g > 100 e g > r
-                        // Azul: b > 100 e b > r e b > g
-                        if ((g > 100 && g > r) || (b > 100 && b > r && b > g)) {
-                            console.log('>>> TOGGLE COLORIDO (ativo) - NÃO CLICAR');
-                            return 'toggle_ja_ativo_cor';
-                        }
-                        
-                        // CINZA = INATIVO - CLICAR
-                        // Cinza: r, g, b são próximos (diferença < 30)
+                        // VERDE ou AZUL = ATIVO
+                        var corAtiva = (g > 100 && g > r) || (b > 100 && b > r && b > g);
+                        // CINZA = INATIVO
                         var maxDiff = Math.max(Math.abs(r-g), Math.abs(g-b), Math.abs(r-b));
-                        if (maxDiff < 40 && r < 200) {
-                            console.log('>>> TOGGLE CINZA (inativo) - CLICANDO PARA ATIVAR');
-                            el.click();
-                            return 'toggle_ativado';
+                        var corInativa = maxDiff < 40 && r < 200;
+                        
+                        if (deveDesativar) {
+                            // MULTIPLICADOR 1.0 ou 1.1: Queremos DESATIVAR
+                            if (corAtiva) {
+                                console.log('>>> TOGGLE COLORIDO (ativo) - CLICANDO PARA DESATIVAR (mult <= 1.1)');
+                                el.click();
+                                return 'toggle_desativado';
+                            } else if (corInativa) {
+                                console.log('>>> TOGGLE CINZA (inativo) - JÁ ESTÁ DESATIVADO');
+                                return 'toggle_ja_inativo_cor';
+                            }
+                        } else {
+                            // MULTIPLICADOR > 1.1: Queremos ATIVAR
+                            if (corAtiva) {
+                                console.log('>>> TOGGLE COLORIDO (ativo) - NÃO CLICAR');
+                                return 'toggle_ja_ativo_cor';
+                            } else if (corInativa) {
+                                console.log('>>> TOGGLE CINZA (inativo) - CLICANDO PARA ATIVAR');
+                                el.click();
+                                return 'toggle_ativado';
+                            }
                         }
                     }
                 }
@@ -1078,9 +1118,9 @@ Status atual: {hora_atual}
             
             console.log('Nenhum toggle encontrado ou não foi possível determinar estado');
             return 'toggle_nao_encontrado_ou_indeterminado';
-        """)
+        """, deve_desativar)
         
-        print(f"Toggle resultado: {toggle_result}")
+        print(f"Toggle resultado: {toggle_result} (deve_desativar={deve_desativar})")
         time.sleep(2)  # Aumentado para Render
         
         # Screenshot final
