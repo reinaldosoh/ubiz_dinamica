@@ -553,56 +553,37 @@ async function cadastrarWebhook(cidade: Cidade) {
   actionLoading.value = `webhook-${cidade.id}`
   
   try {
-    // Validar credenciais
-    if (!cidade.taximachine_api_key || !cidade.taximachine_auth_base64) {
-      alert.warning('Configure as credenciais TaxiMachine primeiro')
-      abrirCredenciais(cidade)
-      return
-    }
-
-    const webhookManager = useTaximachineWebhook()
-    const webhookUrl = `${config.public.supabaseUrl}/functions/v1/webhook-cidade/${cidade.id}`
-
-    // Usar o fluxo completo: limpar webhooks antigos e cadastrar novo
-    const resultado = await webhookManager.recadastrarWebhook(
-      cidade.id,
-      webhookUrl,
-      cidade.taximachine_api_key,
-      cidade.taximachine_auth_base64
+    const response = await fetch(
+      `${config.public.supabaseUrl}/functions/v1/taximachine-api?action=cadastrar&cidade_id=${cidade.id}`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${config.public.supabaseKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({})
+      }
     )
 
-    if (resultado.success) {
-      let mensagem = `Webhook cadastrado com sucesso!\nURL: ${webhookUrl}`
-      if (resultado.deletados > 0) {
-        mensagem += `\n\n${resultado.deletados} webhook(s) antigo(s) removido(s)`
-      }
-      alert.success(mensagem, 'Webhook Cadastrado')
-      
+    const result = await response.json()
+    
+    if (result.success) {
+      alert.success(`Webhook cadastrado com sucesso!\nURL: ${result.webhook_url}`, 'Webhook Cadastrado')
       // Atualizar cidade localmente
       const c = cidades.value.find(c => c.id === cidade.id)
       if (c) {
-        c.webhook_url = webhookUrl
+        c.webhook_url = result.webhook_url
         c.webhook_ativo = true
-        c.webhook_id = resultado.webhookId || null
       }
-
-      // Atualizar no banco
-      await supabase
-        .from('cidades')
-        .update({
-          webhook_url: webhookUrl,
-          webhook_ativo: true,
-          webhook_id: resultado.webhookId || null,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', cidade.id)
+    } else if (result.needs_credentials) {
+      alert.warning('Configure as credenciais TaxiMachine primeiro')
+      abrirCredenciais(cidade)
     } else {
-      const erros = resultado.erros.join('\n')
-      alert.error(`Falha ao cadastrar webhook${erros ? ':\n' + erros : ''}`)
+      alert.error(`${result.error || 'Falha ao cadastrar webhook'}`)
     }
   } catch (e) {
     console.error('Erro ao cadastrar webhook:', e)
-    alert.error(`Erro ao cadastrar webhook: ${e}`)
+    alert.error('Erro ao cadastrar webhook')
   } finally {
     actionLoading.value = null
   }
