@@ -49,6 +49,12 @@ export const useTaximachineWebhook = () => {
 
       const result = await response.json()
       
+      // A resposta vem como: { success: true, data: { response: { webhooks: [...] } } }
+      if (result.success && result.data?.response?.webhooks) {
+        return result.data.response.webhooks
+      }
+      
+      // Fallback para formato antigo (array)
       if (result.success && result.data?.[0]?.response?.webhooks) {
         return result.data[0].response.webhooks
       }
