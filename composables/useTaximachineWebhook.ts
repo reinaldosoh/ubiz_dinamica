@@ -145,23 +145,20 @@ export const useTaximachineWebhook = () => {
   const cadastrarWebhook = async (
     url: string,
     apiKey: string,
-    authBase64: string
+    authBase64: string,
+    cidadeId: string
   ): Promise<{ success: boolean; webhookId?: string; error?: string }> => {
     try {
-      const response = await fetch('https://api.taximachine.com.br/api/integracao/cadastrarWebhook', {
-        method: 'POST',
-        headers: {
-          'User-Agent': 'ua-ubizcar',
-          'api-key': apiKey,
-          'Authorization': `Basic ${authBase64}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          tipo: 'status',
-          responsavel: 'solicitante',
-          url: url
-        })
-      })
+      const response = await fetch(
+        `${supabaseUrl}/functions/v1/taximachine-webhook-manager?action=cadastrar&cidade_id=${cidadeId}`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${supabaseKey}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      )
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`)
@@ -200,7 +197,7 @@ export const useTaximachineWebhook = () => {
     const limpeza = await limparWebhooksStatus(cidadeId, apiKey, authBase64)
 
     // 2. Cadastrar novo webhook
-    const cadastro = await cadastrarWebhook(url, apiKey, authBase64)
+    const cadastro = await cadastrarWebhook(url, apiKey, authBase64, cidadeId)
 
     return {
       success: cadastro.success,
