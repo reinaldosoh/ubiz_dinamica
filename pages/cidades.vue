@@ -23,6 +23,7 @@ import {
   X
 } from 'lucide-vue-next'
 import { useAlert } from '~/composables/useAlert'
+import { useTaximachineWebhook } from '~/composables/useTaximachineWebhook'
 
 // Usar cliente Supabase do plugin (singleton)
 const { $supabase } = useNuxtApp()
@@ -523,26 +524,25 @@ async function listarWebhooks(cidade: Cidade) {
   loadingWebhooks.value = true
 
   try {
-    const response = await fetch(
-      `${config.public.supabaseUrl}/functions/v1/taximachine-api?action=listar&cidade_id=${cidade.id}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${config.public.supabaseKey}`
-        }
-      }
-    )
-
-    const result = await response.json()
-    
-    if (result.success && result.data?.[0]?.response?.webhooks) {
-      webhooksList.value = result.data[0].response.webhooks
-    } else if (result.needs_credentials) {
+    // Validar credenciais
+    if (!cidade.taximachine_api_key || !cidade.taximachine_auth_base64) {
       alert.warning('Configure as credenciais TaxiMachine primeiro')
       showWebhooksModal.value = false
       abrirCredenciais(cidade)
+      return
     }
+
+    const webhookManager = useTaximachineWebhook()
+    const webhooks = await webhookManager.listarWebhooks(
+      cidade.id,
+      cidade.taximachine_api_key,
+      cidade.taximachine_auth_base64
+    )
+    
+    webhooksList.value = webhooks
   } catch (e) {
     console.error('Erro ao listar webhooks:', e)
+    alert.error(`Erro ao listar webhooks: ${e}`)
   } finally {
     loadingWebhooks.value = false
   }
@@ -553,37 +553,56 @@ async function cadastrarWebhook(cidade: Cidade) {
   actionLoading.value = `webhook-${cidade.id}`
   
   try {
-    const response = await fetch(
-      `${config.public.supabaseUrl}/functions/v1/taximachine-api?action=cadastrar&cidade_id=${cidade.id}`,
-      {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${config.public.supabaseKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({})
-      }
+    // Validar credenciais
+    if (!cidade.taximachine_api_key || !cidade.taximachine_auth_base64) {
+      alert.warning('Configure as credenciais TaxiMachine primeiro')
+      abrirCredenciais(cidade)
+      return
+    }
+
+    const webhookManager = useTaximachineWebhook()
+    const webhookUrl = `${config.public.supabaseUrl}/functions/v1/webhook-cidade/${cidade.id}`
+
+    // Usar o fluxo completo: limpar webhooks antigos e cadastrar novo
+    const resultado = await webhookManager.recadastrarWebhook(
+      cidade.id,
+      webhookUrl,
+      cidade.taximachine_api_key,
+      cidade.taximachine_auth_base64
     )
 
-    const result = await response.json()
-    
-    if (result.success) {
-      alert.success(`Webhook cadastrado com sucesso!\nURL: ${result.webhook_url}`, 'Webhook Cadastrado')
+    if (resultado.success) {
+      let mensagem = `Webhook cadastrado com sucesso!\nURL: ${webhookUrl}`
+      if (resultado.deletados > 0) {
+        mensagem += `\n\n${resultado.deletados} webhook(s) antigo(s) removido(s)`
+      }
+      alert.success(mensagem, 'Webhook Cadastrado')
+      
       // Atualizar cidade localmente
       const c = cidades.value.find(c => c.id === cidade.id)
       if (c) {
-        c.webhook_url = result.webhook_url
+        c.webhook_url = webhookUrl
         c.webhook_ativo = true
+        c.webhook_id = resultado.webhookId || null
       }
-    } else if (result.needs_credentials) {
-      alert.warning('Configure as credenciais TaxiMachine primeiro')
-      abrirCredenciais(cidade)
+
+      // Atualizar no banco
+      await supabase
+        .from('cidades')
+        .update({
+          webhook_url: webhookUrl,
+          webhook_ativo: true,
+          webhook_id: resultado.webhookId || null,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', cidade.id)
     } else {
-      alert.error(`${result.error || 'Falha ao cadastrar webhook'}`)
+      const erros = resultado.erros.join('\n')
+      alert.error(`Falha ao cadastrar webhook${erros ? ':\n' + erros : ''}`)
     }
   } catch (e) {
     console.error('Erro ao cadastrar webhook:', e)
-    alert.error('Erro ao cadastrar webhook')
+    alert.error(`Erro ao cadastrar webhook: ${e}`)
   } finally {
     actionLoading.value = null
   }
@@ -592,6 +611,7 @@ async function cadastrarWebhook(cidade: Cidade) {
 // Deletar webhook
 async function deletarWebhook(webhookId: string) {
   if (!selectedCidade.value) return
+  
   const confirmed = await alert.confirm({
     title: 'Deletar Webhook',
     message: 'Tem certeza que deseja deletar este webhook?',
@@ -600,34 +620,52 @@ async function deletarWebhook(webhookId: string) {
   })
   if (!confirmed) return
 
+  // Validar credenciais
+  if (!selectedCidade.value.taximachine_api_key || !selectedCidade.value.taximachine_auth_base64) {
+    alert.warning('Configure as credenciais TaxiMachine primeiro')
+    return
+  }
+
   loadingWebhooks.value = true
   
   try {
-    const response = await fetch(
-      `${config.public.supabaseUrl}/functions/v1/taximachine-api?action=deletar&cidade_id=${selectedCidade.value.id}&webhook_id=${webhookId}`,
-      {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${config.public.supabaseKey}`
-        }
-      }
+    const webhookManager = useTaximachineWebhook()
+    const sucesso = await webhookManager.deletarWebhook(
+      webhookId,
+      selectedCidade.value.taximachine_api_key,
+      selectedCidade.value.taximachine_auth_base64
     )
-
-    const result = await response.json()
     
-    if (result.success) {
+    if (sucesso) {
       webhooksList.value = webhooksList.value.filter(w => w.id !== webhookId)
+      alert.success('Webhook deletado com sucesso!')
+      
       // Atualizar cidade
       const cidade = cidades.value.find(c => c.id === selectedCidade.value?.id)
       if (cidade) {
-        cidade.webhook_ativo = false
-        cidade.webhook_id = null
+        // Se era o webhook de status, atualizar flags
+        const webhook = webhooksList.value.find(w => w.id === webhookId)
+        if (webhook?.tipo === 'status') {
+          cidade.webhook_ativo = false
+          cidade.webhook_id = null
+          
+          // Atualizar no banco
+          await supabase
+            .from('cidades')
+            .update({
+              webhook_ativo: false,
+              webhook_id: null,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', cidade.id)
+        }
       }
     } else {
-      alert.error(`${result.error || 'Falha ao deletar webhook'}`)
+      alert.error('Falha ao deletar webhook')
     }
   } catch (e) {
     console.error('Erro ao deletar webhook:', e)
+    alert.error(`Erro ao deletar webhook: ${e}`)
   } finally {
     loadingWebhooks.value = false
   }
