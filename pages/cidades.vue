@@ -633,7 +633,8 @@ async function deletarWebhook(webhookId: string) {
     const sucesso = await webhookManager.deletarWebhook(
       webhookId,
       selectedCidade.value.taximachine_api_key,
-      selectedCidade.value.taximachine_auth_base64
+      selectedCidade.value.taximachine_auth_base64,
+      selectedCidade.value.id
     )
     
     if (sucesso) {

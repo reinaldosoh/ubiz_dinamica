@@ -20,6 +20,10 @@ interface DeleteWebhookResponse {
 }
 
 export const useTaximachineWebhook = () => {
+  const config = useRuntimeConfig()
+  const supabaseUrl = config.public.supabaseUrl
+  const supabaseKey = config.public.supabaseKey
+
   /**
    * Lista todos os webhooks cadastrados no TaxiMachine para uma cidade
    */
@@ -29,23 +33,24 @@ export const useTaximachineWebhook = () => {
     authBase64: string
   ): Promise<TaximachineWebhook[]> => {
     try {
-      const response = await fetch('https://api.taximachine.com.br/api/integracao/listarWebhook', {
-        method: 'GET',
-        headers: {
-          'User-Agent': 'ua-ubizcar',
-          'api-key': apiKey,
-          'Authorization': `Basic ${authBase64}`
+      const response = await fetch(
+        `${supabaseUrl}/functions/v1/taximachine-webhook-manager?action=listar&cidade_id=${cidadeId}`,
+        {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${supabaseKey}`
+          }
         }
-      })
+      )
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`)
       }
 
-      const data: TaximachineApiResponse[] = await response.json()
+      const result = await response.json()
       
-      if (data && data[0]?.success && data[0].response?.webhooks) {
-        return data[0].response.webhooks
+      if (result.success && result.data?.[0]?.response?.webhooks) {
+        return result.data[0].response.webhooks
       }
 
       return []
@@ -61,17 +66,16 @@ export const useTaximachineWebhook = () => {
   const deletarWebhook = async (
     webhookId: string,
     apiKey: string,
-    authBase64: string
+    authBase64: string,
+    cidadeId: string
   ): Promise<boolean> => {
     try {
       const response = await fetch(
-        `https://api.taximachine.com.br/api/integracao/deletarWebhook/${webhookId}`,
+        `${supabaseUrl}/functions/v1/taximachine-webhook-manager?action=deletar&cidade_id=${cidadeId}&webhook_id=${webhookId}`,
         {
           method: 'DELETE',
           headers: {
-            'User-Agent': 'ua-ubizcar',
-            'api-key': apiKey,
-            'Authorization': `Basic ${authBase64}`
+            'Authorization': `Bearer ${supabaseKey}`
           }
         }
       )
@@ -80,7 +84,7 @@ export const useTaximachineWebhook = () => {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`)
       }
 
-      const data: DeleteWebhookResponse = await response.json()
+      const data = await response.json()
       return data.success
     } catch (error) {
       console.error('Erro ao deletar webhook:', error)
@@ -111,7 +115,7 @@ export const useTaximachineWebhook = () => {
       // Deletar cada um
       for (const webhook of webhooksStatus) {
         try {
-          const sucesso = await deletarWebhook(webhook.id, apiKey, authBase64)
+          const sucesso = await deletarWebhook(webhook.id, apiKey, authBase64, cidadeId)
           if (sucesso) {
             resultado.deletados++
           } else {
