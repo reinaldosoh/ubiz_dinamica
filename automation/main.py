@@ -181,12 +181,14 @@ class CorridasStats(BaseModel):
 class DinamicaRequest(BaseModel):
     multiplicador: float
     headless: bool = False
-    email: str = "reinaldo@painel.com.br"
-    password: str = "Reinaldo@ubizcar10"
+    email: str
+    password: str
     cidade: str = "Não informada"
     estado: str = "Não informado"
     is_test: bool = False  # Se True, adiciona "OBS: ENVIADO COMO TESTE" no webhook
+    teste: bool = False  # alias usado pelo Radar
     corridas_stats: Optional[CorridasStats] = None  # Estatísticas passadas por quem chama a API
+    area_busca: str = "***Geral"  # termo de busca do card manual no TaxiMachine Cloud (por cidade/projeto)
 
 class DinamicaResponse(BaseModel):
     success: bool
@@ -359,7 +361,14 @@ async def atualizar_dinamica(request: DinamicaRequest):
     print(f"Email recebido: {request.email}")
     print(f"Multiplicador: {request.multiplicador}")
     print(f"Headless: {request.headless}")
+    print(f"Area busca: {request.area_busca}")
     
+    if not request.email or not request.password:
+        with executions_lock:
+            active_executions -= 1
+        raise HTTPException(status_code=400, detail="email e password são obrigatórios")
+    
+    area_busca = (request.area_busca or "***Geral").strip() or "***Geral"
     driver = None
     is_new_driver = True
     try:
@@ -543,8 +552,9 @@ async def atualizar_dinamica(request: DinamicaRequest):
         """)
         time.sleep(0.5)  # OTIMIZADO: 1s -> 0.5s
         
-        # 3.5. DIGITAR "***Geral" NO CAMPO DE BUSCA para filtrar o card correto
+        # 3.5. DIGITAR termo de busca no campo para filtrar o card correto
         search_result = driver.execute_script("""
+            var areaBusca = arguments[0];
             // Encontrar o campo de busca (input com placeholder de busca ou ícone de lupa)
             var searchInput = null;
             var inputs = document.querySelectorAll('input');
@@ -569,11 +579,9 @@ async def atualizar_dinamica(request: DinamicaRequest):
             }
             
             if (searchInput) {
-                // Limpar e digitar ***Geral
                 searchInput.focus();
-                searchInput.value = '***Geral';
+                searchInput.value = areaBusca;
                 
-                // Disparar eventos
                 var inputEvent = new Event('input', { bubbles: true });
                 searchInput.dispatchEvent(inputEvent);
                 var changeEvent = new Event('change', { bubbles: true });
@@ -582,7 +590,7 @@ async def atualizar_dinamica(request: DinamicaRequest):
                 return 'busca_preenchida';
             }
             return 'campo_busca_nao_encontrado';
-        """)
+        """, area_busca)
         print(f"Campo de busca: {search_result}")
         time.sleep(0.5)  # OTIMIZADO: 1s -> 0.5s
         
@@ -590,12 +598,12 @@ async def atualizar_dinamica(request: DinamicaRequest):
         # Agora o card "***Geral Manual" deve estar visível após a busca
         
         click_result = driver.execute_script("""
-            // Estratégia 1: Procurar por cards com texto "manual" ou "Geral"
+            var areaBusca = (arguments[0] || '').toLowerCase();
             var elements = document.querySelectorAll('*');
             var targetCard = null;
             
-            // Lista de textos possíveis para encontrar o card
-            var possibleTexts = ['Geral manual', 'geral manual', 'Manual', 'manual'];
+            var possibleTexts = ['manual'];
+            if (areaBusca) possibleTexts.unshift(areaBusca + ' manual', areaBusca);
             
             for (var i = 0; i < elements.length; i++) {
                 var el = elements[i];
@@ -665,7 +673,7 @@ async def atualizar_dinamica(request: DinamicaRequest):
             }
             
             return 'button_not_found';
-        """)
+        """, area_busca)
         
         print(f"Resultado clique menu: {click_result}")
         time.sleep(0.3)
@@ -963,8 +971,9 @@ Status atual: {hora_atual}
         """)
         time.sleep(0.5)  # OTIMIZADO: 1s -> 0.5s
         
-        # Buscar ***Geral novamente para encontrar o card
+        # Buscar termo de área novamente para encontrar o card
         driver.execute_script("""
+            var areaBusca = arguments[0];
             var inputs = document.querySelectorAll('input');
             for (var i = 0; i < inputs.length; i++) {
                 var inp = inputs[i];
@@ -972,14 +981,14 @@ Status atual: {hora_atual}
                 var type = inp.type || 'text';
                 if (rect.width > 0 && rect.height > 0 && type !== 'hidden' && type !== 'checkbox' && type !== 'radio' && type !== 'number') {
                     inp.focus();
-                    inp.value = '***Geral';
+                    inp.value = areaBusca;
                     inp.dispatchEvent(new Event('input', { bubbles: true }));
                     inp.dispatchEvent(new Event('change', { bubbles: true }));
                     break;
                 }
             }
-        """)
-        print("Buscou ***Geral para ativar toggle")
+        """, area_busca)
+        print(f"Buscou '{area_busca}' para ativar toggle")
         time.sleep(1)  # OTIMIZADO: 2s -> 1s
         
         # FECHAR MODAL SE ESTIVER ABERTO (modal "Dinâmica automática")
