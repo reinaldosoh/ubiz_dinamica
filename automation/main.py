@@ -99,6 +99,45 @@ def js_preencher_nome_area(driver, area_busca: str) -> str:
     """, area_busca)
 
 
+def dump_form_estrutura(driver) -> str:
+    """Retorna JSON compacto dos campos visíveis do formulário de edição (diagnóstico)."""
+    try:
+        return driver.execute_script("""
+            function labelText(inp) {
+                if (inp.id) {
+                    var lbl = document.querySelector('label[for="' + inp.id + '"]');
+                    if (lbl) return (lbl.innerText || lbl.textContent || '').trim();
+                }
+                var parent = inp.closest('div, label, fieldset');
+                if (parent) {
+                    var lbl2 = parent.querySelector('label');
+                    if (lbl2) return (lbl2.innerText || lbl2.textContent || '').trim();
+                }
+                return '';
+            }
+            var out = [];
+            var els = document.querySelectorAll('input, textarea, select');
+            for (var i = 0; i < els.length; i++) {
+                var e = els[i];
+                var r = e.getBoundingClientRect();
+                if (r.width <= 0 || r.height <= 0) continue;
+                out.push({
+                    tag: e.tagName,
+                    type: (e.type || '').toLowerCase(),
+                    name: e.name || '',
+                    id: e.id || '',
+                    placeholder: e.placeholder || '',
+                    aria: e.getAttribute('aria-label') || '',
+                    label: labelText(e),
+                    value: (e.value || '').slice(0, 40)
+                });
+            }
+            return JSON.stringify(out);
+        """)
+    except Exception as e:
+        return f"dump_falhou:{e}"
+
+
 def preencher_nome_area(driver, wait, area_busca: str) -> str:
     """Tenta Selenium send_keys primeiro, depois JS React-compatible."""
     xpaths = [
@@ -328,7 +367,7 @@ async def health():
         "memory_mb": round(memory_mb, 2),
         "active_executions": active_executions,
         "mode": "parallel",
-        "version": "2.2.0-nome-area-sendkeys"
+        "version": "2.3.0-form-debug"
     }
 
 @app.post("/driver/close")
@@ -470,6 +509,7 @@ async def atualizar_dinamica(request: DinamicaRequest):
     area_busca = (request.area_busca or "***Geral").strip() or "***Geral"
     driver = None
     is_new_driver = True
+    form_debug = ""
     try:
         # Obter driver do pool ou criar novo
         driver, is_new_driver = get_or_create_driver(request.email, headless=request.headless)
@@ -810,6 +850,10 @@ async def atualizar_dinamica(request: DinamicaRequest):
         except Exception:
             pass
         time.sleep(1.5)
+        
+        # DIAGNÓSTICO: capturar estrutura real do formulário de edição
+        form_debug = dump_form_estrutura(driver)
+        print(f"FORM_DEBUG: {form_debug}")
         
         # 5. Preencher NOME DA ÁREA (obrigatório no formulário de edição TM)
         nome_area_result = preencher_nome_area(driver, wait, area_busca)
@@ -1298,7 +1342,7 @@ Status atual: {hora_atual}
         
         return DinamicaResponse(
             success=False,
-            message=f"Erro geral: {str(e)}",
+            message=f"Erro geral: {str(e)} | FORM_DEBUG: {form_debug}",
             screenshot_path=screenshot_path
         )
 
