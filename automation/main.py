@@ -6,6 +6,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import UnexpectedAlertPresentException
@@ -28,8 +29,14 @@ def js_preencher_nome_area(driver, area_busca: str) -> str:
     """Preenche o campo obrigatório 'Nome da área' no formulário de edição TM."""
     return driver.execute_script("""
         var areaNome = arguments[0];
-        var roots = document.querySelectorAll('[role="dialog"], [class*="modal" i], [class*="Modal"], form');
-        var searchRoots = roots.length ? Array.from(roots) : [document];
+
+        function setNativeValue(element, value) {
+            var prototype = Object.getPrototypeOf(element);
+            var valueSetter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
+            valueSetter.call(element, value);
+            element.dispatchEvent(new Event('input', { bubbles: true }));
+            element.dispatchEvent(new Event('change', { bubbles: true }));
+        }
 
         function labelText(inp) {
             if (inp.id) {
@@ -44,12 +51,8 @@ def js_preencher_nome_area(driver, area_busca: str) -> str:
             return '';
         }
 
-        function preencher(inp, valor) {
-            inp.focus();
-            inp.value = valor;
-            inp.dispatchEvent(new Event('input', { bubbles: true }));
-            inp.dispatchEvent(new Event('change', { bubbles: true }));
-        }
+        var roots = document.querySelectorAll('[role="dialog"], [class*="modal" i], [class*="Modal"], form');
+        var searchRoots = roots.length ? Array.from(roots) : [document];
 
         for (var r = 0; r < searchRoots.length; r++) {
             var root = searchRoots[r];
@@ -73,8 +76,8 @@ def js_preencher_nome_area(driver, area_busca: str) -> str:
                     (name.includes('nome') && (name.includes('area') || name.includes('área')));
 
                 if (pareceNomeArea) {
-                    preencher(inp, areaNome);
-                    return 'nome_area_label:' + areaNome;
+                    setNativeValue(inp, areaNome);
+                    return 'nome_area_label:' + areaNome + ':val=' + inp.value;
                 }
             }
 
@@ -88,12 +91,34 @@ def js_preencher_nome_area(driver, area_busca: str) -> str:
                 visibleText.push(inp2);
             }
             if (visibleText.length >= 1) {
-                preencher(visibleText[0], areaNome);
-                return 'nome_area_primeiro_text:' + areaNome;
+                setNativeValue(visibleText[0], areaNome);
+                return 'nome_area_primeiro_text:' + areaNome + ':val=' + visibleText[0].value;
             }
         }
         return 'nome_area_nao_encontrado';
     """, area_busca)
+
+
+def preencher_nome_area(driver, wait, area_busca: str) -> str:
+    """Tenta Selenium send_keys primeiro, depois JS React-compatible."""
+    xpaths = [
+        "//*[@role='dialog']//label[contains(., 'Nome') and (contains(., 'área') or contains(., 'area'))]/following::input[1]",
+        "//label[contains(., 'Nome da área') or contains(., 'Nome da area')]/following::input[1]",
+        "//input[contains(@placeholder, 'Nome da área') or contains(@placeholder, 'Nome da area')]",
+        "//*[@role='dialog']//input[@type='text' or @type='search'][1]",
+        "//form//input[@type='text'][1]",
+    ]
+    for xp in xpaths:
+        try:
+            el = wait.until(EC.element_to_be_clickable((By.XPATH, xp)))
+            el.click()
+            el.send_keys(Keys.CONTROL, "a")
+            el.send_keys(Keys.BACKSPACE)
+            el.send_keys(area_busca)
+            return f"selenium_xpath:{xp}"
+        except Exception:
+            continue
+    return js_preencher_nome_area(driver, area_busca)
 
 
 def buscar_corridas_stats_fallback(cidade_nome: str) -> dict:
@@ -302,7 +327,8 @@ async def health():
         "service": "automation-api",
         "memory_mb": round(memory_mb, 2),
         "active_executions": active_executions,
-        "mode": "parallel"
+        "mode": "parallel",
+        "version": "2.2.0-nome-area-sendkeys"
     }
 
 @app.post("/driver/close")
@@ -786,7 +812,7 @@ async def atualizar_dinamica(request: DinamicaRequest):
         time.sleep(1.5)
         
         # 5. Preencher NOME DA ÁREA (obrigatório no formulário de edição TM)
-        nome_area_result = js_preencher_nome_area(driver, area_busca)
+        nome_area_result = preencher_nome_area(driver, wait, area_busca)
         print(f"Nome área formulário: {nome_area_result}")
         time.sleep(0.3)
 
@@ -955,7 +981,7 @@ async def atualizar_dinamica(request: DinamicaRequest):
         time.sleep(0.3)
         
         # Reforçar nome da área imediatamente antes de salvar
-        nome_area_result2 = js_preencher_nome_area(driver, area_busca)
+        nome_area_result2 = preencher_nome_area(driver, wait, area_busca)
         print(f"Nome área antes de salvar: {nome_area_result2}")
         time.sleep(0.2)
         
@@ -984,6 +1010,7 @@ async def atualizar_dinamica(request: DinamicaRequest):
             except Exception:
                 pass
             js_preencher_nome_area(driver, area_busca)
+            preencher_nome_area(driver, wait, area_busca)
             time.sleep(0.3)
             clicar_salvar()
         
