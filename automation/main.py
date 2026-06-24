@@ -416,7 +416,7 @@ async def health():
         "memory_mb": round(memory_mb, 2),
         "active_executions": active_executions,
         "mode": "parallel",
-        "version": "3.4.1-login-entrar"
+        "version": "3.4.2-login-diag"
     }
 
 @app.post("/driver/close")
@@ -1052,7 +1052,8 @@ def _login_se_preciso(driver, wait, email: str, password: str):
     password_field.send_keys(password)
     time.sleep(0.4)
 
-    # Clicar especificamente no botão "Entrar" (#entrar) — nunca em outro botão da página
+    # Clicar especificamente no botão "Entrar" (#entrar) — nunca em outro botão da página.
+    # Também dispara Enter no campo de senha como reforço (login é via AJAX, sem <form>).
     clicado = driver.execute_script("""
         var b = document.querySelector('#entrar');
         if (!b) {
@@ -1066,26 +1067,41 @@ def _login_se_preciso(driver, wait, email: str, password: str):
     """)
     if not clicado:
         return False, "botao_entrar_nao_encontrado"
+    try:
+        password_field.send_keys("\n")
+    except Exception:
+        pass
 
-    # Login é via AJAX: aguardar sair da página de login (até ~15s)
-    for _ in range(15):
+    # Login é via AJAX: aguardar sair da página de login (até ~18s)
+    for _ in range(18):
         time.sleep(1)
         if "login" not in driver.current_url.lower():
             return True, ""
 
-    # Ainda na página de login -> coletar diagnóstico (erros visíveis / 2FA)
+    # Ainda na página de login -> coletar diagnóstico detalhado
     try:
         diag = driver.execute_script("""
+            function txt(sel){ var e=document.querySelector(sel); return e ? (e.innerText||e.textContent||'').trim() : null; }
             var errs = [];
             document.querySelectorAll('.help-block.error, .error, .alert, .toast, .um-mensagem, .mensagem').forEach(function(e){
                 var t = (e.innerText || '').trim();
                 if (t) errs.push(t);
             });
+            var btn = document.querySelector('#entrar');
+            var mfaVisivel = false;
+            document.querySelectorAll('.mfa__panel, [class*="mfa__panel"]').forEach(function(p){
+                var st = window.getComputedStyle(p);
+                if (st.display !== 'none' && st.visibility !== 'hidden' && p.offsetHeight > 0) mfaVisivel = true;
+            });
             return JSON.stringify({
                 url: location.href,
                 title: document.title,
-                mfa: !!document.querySelector('.mfa__panel, #codigo-cadastro-2fa, [class*="mfa__"]'),
-                errs: errs.slice(0, 5)
+                erro_user: txt('#LoginForm_username_em_'),
+                erro_senha: txt('#LoginForm_password_em_'),
+                mfa_visivel: mfaVisivel,
+                entrar_disabled: btn ? btn.disabled : 'sem_botao',
+                errs: errs.slice(0, 6),
+                body: (document.body.innerText || '').replace(/\\s+/g,' ').slice(0, 400)
             });
         """)
     except Exception as e:
