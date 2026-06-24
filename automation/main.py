@@ -394,7 +394,7 @@ async def health():
         "memory_mb": round(memory_mb, 2),
         "active_executions": active_executions,
         "mode": "parallel",
-        "version": "3.1.1-menu-dump"
+        "version": "3.2.0-editar-direto"
     }
 
 @app.post("/driver/close")
@@ -712,27 +712,23 @@ async def atualizar_dinamica(request: DinamicaRequest):
         print(f"Menu card: {menu_result}")
         time.sleep(0.5)
 
-        # 4.5. CLICAR EM "Editar" no dropdown (classe real: dropdown__editar)
+        # 4.5. CLICAR EM "Editar" no dropdown.
+        # O dropdown (.dropdown__list.lista-opcao_fator) fica com classe "hide";
+        # o <a> de Editar tem classe vazia e texto "editEditar". Removemos "hide"
+        # e clicamos o anchor diretamente (.click() dispara o handler mesmo oculto).
         editar_result = "editar_nao_encontrado"
         for _ in range(8):
             editar_result = driver.execute_script("""
-                function clicar(el){
-                    var r = el.getBoundingClientRect();
-                    if (r.width <= 0 || r.height <= 0) return false;
-                    var top = document.elementFromPoint(r.x + r.width/2, r.y + r.height/2);
-                    (top || el).click();
-                    return true;
-                }
-                // 1. Seletor por classe real
-                var a = document.querySelector('a.dropdown__editar, .dropdown__editar, [class*="editar"]');
-                if (a && clicar(a)) return 'editar_clicado_classe';
-                // 2. Fallback por texto (item de dropdown)
-                var els = document.querySelectorAll('a, button, li');
-                for (var i = 0; i < els.length; i++) {
-                    var t = (els[i].innerText || '').trim();
-                    if (t === 'Editar' || t.endsWith('Editar') || t.indexOf('Editar') !== -1) {
-                        if ((els[i].innerText || '').indexOf('Deletar') !== -1) continue;
-                        if (clicar(els[i])) return 'editar_clicado_texto';
+                // Revelar dropdowns ocultos
+                document.querySelectorAll('.dropdown__list, .lista-opcao_fator, [class*="dropdown__list"]').forEach(function(l){
+                    l.classList.remove('hide');
+                });
+                // Procurar anchor de Editar (texto contém Editar, não Deletar)
+                var anchors = document.querySelectorAll('a, li, button');
+                for (var i = 0; i < anchors.length; i++) {
+                    var t = (anchors[i].innerText || anchors[i].textContent || '').trim();
+                    if (t.indexOf('Editar') !== -1 && t.indexOf('Deletar') === -1) {
+                        try { anchors[i].click(); return 'editar_clicado_direto'; } catch(e){}
                     }
                 }
                 return 'editar_nao_encontrado';
