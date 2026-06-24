@@ -416,7 +416,7 @@ async def health():
         "memory_mb": round(memory_mb, 2),
         "active_executions": active_executions,
         "mode": "parallel",
-        "version": "3.4.2-login-diag"
+        "version": "3.5.0-listar-acao"
     }
 
 @app.post("/driver/close")
@@ -1289,6 +1289,253 @@ async def criar_area_dinamica(request: CriarAreaRequest):
             active_executions -= 1
         gc.collect()
         return CriarAreaResponse(success=False, message=f"Erro geral: {str(e)}")
+
+
+# ===================== FASE 2: LISTAR / GERENCIAR ÁREAS =====================
+
+class ListarAreasRequest(BaseModel):
+    email: str
+    password: str
+    bandeira_id: Optional[int] = None
+    headless: bool = True
+
+class AcaoAreaRequest(BaseModel):
+    email: str
+    password: str
+    acao: str                                # ativar | desativar | editar | deletar
+    fator_id: Any
+    area_id: Any
+    bandeira_id: Optional[int] = None
+    tipo_calculo: str = "M"                  # para editar: M (multiplicador) / F (valor adicional)
+    fator: Optional[float] = None
+    valor_adicional: Optional[float] = None
+    headless: bool = True
+
+
+def _garantir_pagina_dinamica(driver, bandeira_id=None):
+    """Navega para a página de dinâmica, garante aba Manuais e retorna o bandeira_id."""
+    driver.get("https://cloud.taximachine.com.br/tarifaCategoria/dinamica")
+    time.sleep(1.2)
+    driver.execute_script("""
+        var alvo = null;
+        document.querySelectorAll('button, a, span, div').forEach(function(el) {
+            if (!alvo && (el.innerText || '').trim() === 'Manuais') alvo = el;
+        });
+        if (alvo) alvo.click();
+    """)
+    time.sleep(0.8)
+    bandeira = bandeira_id
+    if not bandeira:
+        bandeira = driver.execute_script("return (typeof bandeiraBusca !== 'undefined') ? bandeiraBusca : null;")
+    return bandeira
+
+
+@app.post("/dinamica/listar-areas")
+async def listar_areas_dinamica(request: ListarAreasRequest):
+    """Lista as áreas de dinâmica manuais existentes na Machine (GET /tarifaCategoria/dinamicaArea)."""
+    global active_executions
+    with executions_lock:
+        active_executions += 1
+    print(f"=== LISTAR AREAS ({request.email}) ===")
+
+    if not request.email or not request.password:
+        with executions_lock:
+            active_executions -= 1
+        raise HTTPException(status_code=400, detail="email e password são obrigatórios")
+
+    driver = None
+    try:
+        driver, is_new_driver = get_or_create_driver(request.email, headless=request.headless)
+        wait = WebDriverWait(driver, 20)
+        if is_new_driver:
+            driver.get("https://cloud.taximachine.com.br/site/login")
+            time.sleep(1)
+        else:
+            driver.get("https://cloud.taximachine.com.br/tarifaCategoria/dinamica")
+            time.sleep(1)
+
+        login_ok, login_detalhe = _login_se_preciso(driver, wait, request.email, request.password)
+        if not login_ok:
+            force_close_driver(request.email)
+            with executions_lock:
+                active_executions -= 1
+            return {"success": False, "message": "Falha no login", "detalhe": login_detalhe}
+
+        bandeira = _garantir_pagina_dinamica(driver, request.bandeira_id)
+
+        driver.set_script_timeout(30)
+        resultado = driver.execute_async_script("""
+            var payload = arguments[0];
+            var cb = arguments[arguments.length - 1];
+            try {
+                if (typeof jQuery === 'undefined') { cb({ok:false, error:'jquery_ausente'}); return; }
+                jQuery.ajax({
+                    url: '/tarifaCategoria/dinamicaArea',
+                    method: 'GET',
+                    timeout: 20000,
+                    data: { bandeira_id: payload.bandeira_id }
+                })
+                .done(function (data) { cb({ok:true, data:data}); })
+                .fail(function (e) {
+                    cb({ok:false, error:(e.responseText || 'erro_conexao'), status:e.status});
+                });
+            } catch (err) { cb({ok:false, error:String(err)}); }
+        """, {"bandeira_id": bandeira})
+
+        release_driver(request.email)
+        with executions_lock:
+            active_executions -= 1
+
+        if resultado and resultado.get("ok"):
+            data = resultado.get("data") or {}
+            if isinstance(data, dict):
+                areas = data.get("areas", [])
+                glob = data.get("global")
+            else:
+                areas = data
+                glob = None
+            print(f"Áreas listadas: {len(areas) if isinstance(areas, list) else '?'}")
+            return {"success": True, "bandeira_id": bandeira, "areas": areas, "global": glob}
+        else:
+            return {"success": False, "message": f"Erro ao listar áreas: {(resultado or {}).get('error')}", "detalhe": resultado}
+
+    except Exception as e:
+        force_close_driver(request.email)
+        with executions_lock:
+            active_executions -= 1
+        gc.collect()
+        return {"success": False, "message": f"Erro geral: {str(e)}"}
+
+
+@app.post("/dinamica/area/acao")
+async def acao_area_dinamica(request: AcaoAreaRequest):
+    """Ativa, desativa, edita o fator ou deleta uma área de dinâmica existente."""
+    global active_executions
+    with executions_lock:
+        active_executions += 1
+
+    acao = (request.acao or "").strip().lower()
+    print(f"=== ACAO AREA ({request.email}) acao={acao} fator_id={request.fator_id} area_id={request.area_id} ===")
+
+    if not request.email or not request.password:
+        with executions_lock:
+            active_executions -= 1
+        raise HTTPException(status_code=400, detail="email e password são obrigatórios")
+    if acao not in ("ativar", "desativar", "editar", "deletar"):
+        with executions_lock:
+            active_executions -= 1
+        raise HTTPException(status_code=400, detail="acao inválida (ativar|desativar|editar|deletar)")
+    if request.fator_id is None or request.area_id is None:
+        with executions_lock:
+            active_executions -= 1
+        raise HTTPException(status_code=400, detail="fator_id e area_id são obrigatórios")
+
+    driver = None
+    try:
+        driver, is_new_driver = get_or_create_driver(request.email, headless=request.headless)
+        wait = WebDriverWait(driver, 20)
+        if is_new_driver:
+            driver.get("https://cloud.taximachine.com.br/site/login")
+            time.sleep(1)
+        else:
+            driver.get("https://cloud.taximachine.com.br/tarifaCategoria/dinamica")
+            time.sleep(1)
+
+        login_ok, login_detalhe = _login_se_preciso(driver, wait, request.email, request.password)
+        if not login_ok:
+            force_close_driver(request.email)
+            with executions_lock:
+                active_executions -= 1
+            return {"success": False, "message": "Falha no login", "detalhe": login_detalhe}
+
+        bandeira = _garantir_pagina_dinamica(driver, request.bandeira_id)
+
+        if acao in ("ativar", "desativar"):
+            url = "/tarifaCategoria/ativarFator"
+            data = {
+                "fator_id": request.fator_id,
+                "area_id": request.area_id,
+                "ativo": 1 if acao == "ativar" else 0,
+                "bandeira_id": bandeira,
+            }
+        elif acao == "deletar":
+            url = "/tarifaCategoria/apagarFatorDinamica"
+            data = {
+                "fator_id": request.fator_id,
+                "area_id": request.area_id,
+                "bandeira_id": bandeira,
+            }
+        else:  # editar
+            tc = (request.tipo_calculo or "M").upper()
+            if tc not in ("M", "F"):
+                tc = "M"
+            if tc == "F":
+                valor = request.valor_adicional if request.valor_adicional is not None else request.fator
+                if valor is None:
+                    force_close_driver(request.email)
+                    with executions_lock:
+                        active_executions -= 1
+                    raise HTTPException(status_code=400, detail="valor_adicional obrigatório para tipo_calculo=F")
+                data = {
+                    "fator_id": request.fator_id,
+                    "area_id": request.area_id,
+                    "fator_area": None,
+                    "tipo_calculo": "F",
+                    "area_alterada": False,
+                    "bandeira_id": bandeira,
+                    "valor_adicional": f"{float(valor):.2f}",
+                }
+            else:
+                fator = request.fator if request.fator is not None else request.valor_adicional
+                if fator is None:
+                    force_close_driver(request.email)
+                    with executions_lock:
+                        active_executions -= 1
+                    raise HTTPException(status_code=400, detail="fator obrigatório para tipo_calculo=M")
+                data = {
+                    "fator_id": request.fator_id,
+                    "area_id": request.area_id,
+                    "fator_area": str(fator),
+                    "tipo_calculo": "M",
+                    "area_alterada": False,
+                    "bandeira_id": bandeira,
+                    "valor_adicional": None,
+                }
+            url = "/tarifaCategoria/editarFatorDinamica"
+
+        driver.set_script_timeout(30)
+        resultado = driver.execute_async_script("""
+            var p = arguments[0];
+            var cb = arguments[arguments.length - 1];
+            try {
+                if (typeof jQuery === 'undefined') { cb({ok:false, error:'jquery_ausente'}); return; }
+                jQuery.ajax({ url: p.url, method: 'POST', timeout: 20000, data: p.data })
+                .done(function (d) { cb({ok:true, data:d}); })
+                .fail(function (e) {
+                    var msg = '';
+                    if (e.responseJSON && e.responseJSON.errors && e.responseJSON.errors.length) msg = e.responseJSON.errors[0];
+                    else if (e.responseText) msg = e.responseText;
+                    else msg = 'erro_conexao';
+                    cb({ok:false, error:msg, status:e.status});
+                });
+            } catch (err) { cb({ok:false, error:String(err)}); }
+        """, {"url": url, "data": data})
+
+        release_driver(request.email)
+        with executions_lock:
+            active_executions -= 1
+
+        if resultado and resultado.get("ok"):
+            return {"success": True, "acao": acao, "data": resultado.get("data")}
+        else:
+            return {"success": False, "message": f"Erro ao {acao}: {(resultado or {}).get('error')}", "detalhe": resultado}
+
+    except Exception as e:
+        force_close_driver(request.email)
+        with executions_lock:
+            active_executions -= 1
+        gc.collect()
+        return {"success": False, "message": f"Erro geral: {str(e)}"}
 
 
 if __name__ == "__main__":
