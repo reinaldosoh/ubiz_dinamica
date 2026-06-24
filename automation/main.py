@@ -394,7 +394,7 @@ async def health():
         "memory_mb": round(memory_mb, 2),
         "active_executions": active_executions,
         "mode": "parallel",
-        "version": "3.0.0-ids-reais"
+        "version": "3.1.0-editar-classe"
     }
 
 @app.post("/driver/close")
@@ -712,22 +712,34 @@ async def atualizar_dinamica(request: DinamicaRequest):
         print(f"Menu card: {menu_result}")
         time.sleep(0.5)
 
-        # 4.5. CLICAR EM "Editar" no dropdown
-        editar_result = driver.execute_script("""
-            var els = document.querySelectorAll('a, button, li, span, div');
-            for (var i = 0; i < els.length; i++) {
-                var t = (els[i].innerText || '').trim();
-                if ((t === 'Editar' || t.endsWith('Editar')) && els[i].children.length <= 1) {
-                    var r = els[i].getBoundingClientRect();
-                    if (r.width > 0 && r.width < 260 && r.height > 0) {
-                        var top = document.elementFromPoint(r.x + r.width/2, r.y + r.height/2);
-                        (top || els[i]).click();
-                        return 'editar_clicado';
+        # 4.5. CLICAR EM "Editar" no dropdown (classe real: dropdown__editar)
+        editar_result = "editar_nao_encontrado"
+        for _ in range(8):
+            editar_result = driver.execute_script("""
+                function clicar(el){
+                    var r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) return false;
+                    var top = document.elementFromPoint(r.x + r.width/2, r.y + r.height/2);
+                    (top || el).click();
+                    return true;
+                }
+                // 1. Seletor por classe real
+                var a = document.querySelector('a.dropdown__editar, .dropdown__editar, [class*="editar"]');
+                if (a && clicar(a)) return 'editar_clicado_classe';
+                // 2. Fallback por texto (item de dropdown)
+                var els = document.querySelectorAll('a, button, li');
+                for (var i = 0; i < els.length; i++) {
+                    var t = (els[i].innerText || '').trim();
+                    if (t === 'Editar' || t.endsWith('Editar') || t.indexOf('Editar') !== -1) {
+                        if ((els[i].innerText || '').indexOf('Deletar') !== -1) continue;
+                        if (clicar(els[i])) return 'editar_clicado_texto';
                     }
                 }
-            }
-            return 'editar_nao_encontrado';
-        """)
+                return 'editar_nao_encontrado';
+            """)
+            if editar_result != "editar_nao_encontrado":
+                break
+            time.sleep(0.4)
         print(f"Editar: {editar_result}")
 
         # 5. AGUARDAR o formulário de edição abrir (campo #nome_tarifa visível)
