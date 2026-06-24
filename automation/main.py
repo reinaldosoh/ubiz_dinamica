@@ -139,25 +139,52 @@ def dump_form_estrutura(driver) -> str:
 
 
 def preencher_nome_area(driver, wait, area_busca: str) -> str:
-    """Tenta Selenium send_keys primeiro, depois JS React-compatible."""
-    xpaths = [
-        "//*[@role='dialog']//label[contains(., 'Nome') and (contains(., 'área') or contains(., 'area'))]/following::input[1]",
-        "//label[contains(., 'Nome da área') or contains(., 'Nome da area')]/following::input[1]",
-        "//input[contains(@placeholder, 'Nome da área') or contains(@placeholder, 'Nome da area')]",
-        "//*[@role='dialog']//input[@type='text' or @type='search'][1]",
-        "//form//input[@type='text'][1]",
-    ]
-    for xp in xpaths:
-        try:
-            el = wait.until(EC.element_to_be_clickable((By.XPATH, xp)))
-            el.click()
-            el.send_keys(Keys.CONTROL, "a")
-            el.send_keys(Keys.BACKSPACE)
-            el.send_keys(area_busca)
-            return f"selenium_xpath:{xp}"
-        except Exception:
-            continue
-    return js_preencher_nome_area(driver, area_busca)
+    """Garante que o campo Nome da área (#nome_tarifa) do form de edição esteja preenchido."""
+    try:
+        return driver.execute_script("""
+            var valor = arguments[0];
+            var inp = document.querySelector('#nome_tarifa');
+            if (!inp) return 'nome_tarifa_ausente';
+            if (inp.value && inp.value.trim()) return 'nome_tarifa_ja_preenchido:' + inp.value;
+            var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter.call(inp, valor);
+            inp.dispatchEvent(new Event('input', { bubbles: true }));
+            inp.dispatchEvent(new Event('change', { bubbles: true }));
+            return 'nome_tarifa_preenchido:' + inp.value;
+        """, area_busca)
+    except Exception as e:
+        return f"nome_area_erro:{e}"
+
+
+def dismiss_onboarding(driver) -> str:
+    """Fecha modais de introdução e tooltips de onboarding do TM Cloud."""
+    try:
+        return driver.execute_script("""
+            var acoes = [];
+            // 1. Fechar botões de close (X) de modais/explanations
+            document.querySelectorAll('.mapa__explanation__close, .close, button[aria-label="Close"]').forEach(function(b){
+                var r = b.getBoundingClientRect();
+                if (r.width > 0 && r.height > 0) { try { b.click(); acoes.push('close'); } catch(e){} }
+            });
+            // 2. Clicar em botões "Entendi"/"Concluir"/"Explorar" de tooltips
+            document.querySelectorAll('button, a').forEach(function(b){
+                var t = (b.innerText || '').trim();
+                if (t === 'Entendi' || t === 'Concluir' || t === 'Finalizar') {
+                    var r = b.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) { try { b.click(); acoes.push(t); } catch(e){} }
+                }
+            });
+            // 3. Remover ícones "close" (material) de modais visíveis no topo
+            document.querySelectorAll('i, span').forEach(function(el){
+                if ((el.innerText || '').trim() === 'close') {
+                    var r = el.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0 && r.top < 300) { try { el.click(); acoes.push('icon_close'); } catch(e){} }
+                }
+            });
+            return acoes.join(',') || 'nenhum';
+        """)
+    except Exception as e:
+        return f"dismiss_erro:{e}"
 
 
 def buscar_corridas_stats_fallback(cidade_nome: str) -> dict:
@@ -367,7 +394,7 @@ async def health():
         "memory_mb": round(memory_mb, 2),
         "active_executions": active_executions,
         "mode": "parallel",
-        "version": "2.3.0-form-debug"
+        "version": "3.0.0-ids-reais"
     }
 
 @app.post("/driver/close")
@@ -620,445 +647,153 @@ async def atualizar_dinamica(request: DinamicaRequest):
         from selenium.webdriver.common.keys import Keys
         from selenium.webdriver.common.action_chains import ActionChains
         
-        # FECHAR MODAL - Baseado no print 6.png
-        # O X está no canto superior direito do modal branco
-        def fechar_modal():
-            # Encontrar coordenadas do X e clicar
-            coords = driver.execute_script("""
-                // Procurar o modal pelo conteúdo
-                var elements = document.querySelectorAll('*');
-                for (var i = 0; i < elements.length; i++) {
-                    var el = elements[i];
-                    var text = el.innerText || '';
-                    // Encontrar o container do modal
-                    if (text.includes('Dinâmica automática') && text.includes('Explorar')) {
-                        var rect = el.getBoundingClientRect();
-                        // O X está aproximadamente no canto superior direito
-                        // Baseado no print: modal tem ~400px de largura, X está a ~20px da borda direita e ~20px do topo
-                        return {
-                            x: rect.right - 25,
-                            y: rect.top + 25,
-                            found: true
-                        };
-                    }
-                }
-                return { found: false };
-            """)
-            
-            if coords and coords.get('found'):
-                # Clicar nas coordenadas do X
-                ActionChains(driver).move_by_offset(coords['x'], coords['y']).click().perform()
-                ActionChains(driver).move_by_offset(-coords['x'], -coords['y']).perform()
-                return True
-            return False
-        
-        # Tentar fechar via JavaScript direto - FORÇAR REMOÇÃO
+        # Fechar modais de introdução e tooltips de onboarding (Entendi/Explorar/X)
+        for _ in range(5):
+            acoes = dismiss_onboarding(driver)
+            print(f"Onboarding dismiss: {acoes}")
+            if acoes in ("nenhum", "") or str(acoes).startswith("dismiss_erro"):
+                break
+            time.sleep(0.4)
+
+        # 3. CLICAR NA ABA "MANUAIS"
         driver.execute_script("""
-            // Remover TODOS os elementos que parecem ser modais/overlays
-            var toRemove = [];
-            document.querySelectorAll('*').forEach(function(el) {
-                var style = window.getComputedStyle(el);
-                var text = el.innerText || '';
-                // Se tem position fixed/absolute e está visível, pode ser modal
-                if ((style.position === 'fixed' || style.position === 'absolute') && 
-                    style.display !== 'none' && 
-                    text.includes('Dinâmica automática')) {
-                    toRemove.push(el);
-                }
-            });
-            toRemove.forEach(function(el) { el.remove(); });
-            
-            // Remover backdrops
-            document.querySelectorAll('[class*="backdrop"], [class*="overlay"], [class*="modal"]').forEach(function(el) {
-                el.remove();
-            });
-        """)
-        time.sleep(0.2)  # OTIMIZADO: 0.5s -> 0.2s
-        
-        # Pressionar ESC uma vez
-        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-        time.sleep(0.1)  # OTIMIZADO: 0.2s -> 0.1s
-        
-        # 3. CLICAR NA ABA "MANUAIS" via JavaScript (RÁPIDO)
-        driver.execute_script("""
-            var clicked = false;
+            var alvo = null;
             document.querySelectorAll('button, a, span, div').forEach(function(el) {
-                if (!clicked && el.innerText && el.innerText.trim() === 'Manuais') {
-                    el.click();
-                    clicked = true;
-                }
+                if (!alvo && (el.innerText || '').trim() === 'Manuais') alvo = el;
             });
+            if (alvo) alvo.click();
         """)
-        time.sleep(0.5)  # OTIMIZADO: 1s -> 0.5s
-        
-        # 3.5. DIGITAR termo de busca no campo para filtrar o card correto
+        time.sleep(0.8)
+        dismiss_onboarding(driver)
+
+        # 3.5. BUSCAR a área pelo campo real (placeholder "Buscar por nome da área")
         search_result = driver.execute_script("""
             var areaBusca = arguments[0];
-            // Encontrar o campo de busca (input com placeholder de busca ou ícone de lupa)
-            var searchInput = null;
-            var inputs = document.querySelectorAll('input');
-            
-            for (var i = 0; i < inputs.length; i++) {
-                var inp = inputs[i];
-                var rect = inp.getBoundingClientRect();
-                var placeholder = (inp.placeholder || '').toLowerCase();
-                var type = inp.type || 'text';
-                
-                // Ignorar inputs invisíveis
-                if (rect.width <= 0 || rect.height <= 0) continue;
-                if (type === 'hidden' || type === 'checkbox' || type === 'radio' || type === 'number') continue;
-                
-                // Campo de busca geralmente tem placeholder ou está no topo
-                if (placeholder.includes('busca') || placeholder.includes('pesquis') || 
-                    placeholder.includes('search') || placeholder.includes('filtro') ||
-                    rect.top < 400) {
-                    searchInput = inp;
-                    break;
+            var inp = document.querySelector('input[placeholder*="Buscar"]');
+            if (!inp) {
+                var ins = document.querySelectorAll('input[type="text"], input:not([type])');
+                for (var i = 0; i < ins.length; i++) {
+                    var r = ins[i].getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) { inp = ins[i]; break; }
                 }
             }
-            
-            if (searchInput) {
-                searchInput.focus();
-                searchInput.value = areaBusca;
-                
-                var inputEvent = new Event('input', { bubbles: true });
-                searchInput.dispatchEvent(inputEvent);
-                var changeEvent = new Event('change', { bubbles: true });
-                searchInput.dispatchEvent(changeEvent);
-                
-                return 'busca_preenchida';
-            }
-            return 'campo_busca_nao_encontrado';
+            if (!inp) return 'campo_busca_nao_encontrado';
+            var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            inp.focus();
+            setter.call(inp, areaBusca);
+            inp.dispatchEvent(new Event('input', { bubbles: true }));
+            inp.dispatchEvent(new Event('change', { bubbles: true }));
+            return 'busca_preenchida';
         """, area_busca)
         print(f"Campo de busca: {search_result}")
-        time.sleep(0.5)  # OTIMIZADO: 1s -> 0.5s
-        
-        # 4. ENCONTRAR CARD DE DINÂMICA E CLICAR NOS 3 PONTOS
-        # Agora o card "***Geral Manual" deve estar visível após a busca
-        
-        click_result = driver.execute_script("""
-            var areaBusca = (arguments[0] || '').toLowerCase();
-            var elements = document.querySelectorAll('*');
-            var targetCard = null;
-            
-            var possibleTexts = ['manual'];
-            if (areaBusca) possibleTexts.unshift(areaBusca + ' manual', areaBusca);
-            
-            for (var i = 0; i < elements.length; i++) {
-                var el = elements[i];
-                var text = el.innerText || '';
-                var rect = el.getBoundingClientRect();
-                
-                // Card deve ter tamanho razoável e estar visível
-                if (rect.width < 100 || rect.width > 400 || rect.height < 50 || rect.height > 300) continue;
-                if (rect.top < 0 || rect.left < 0) continue;
-                
-                // Verificar se contém algum dos textos possíveis
-                for (var j = 0; j < possibleTexts.length; j++) {
-                    if (text.includes(possibleTexts[j]) && !text.includes('Dinâmicas automáticas')) {
-                        targetCard = el;
-                        console.log('Card encontrado com texto:', possibleTexts[j]);
-                        break;
-                    }
-                }
-                if (targetCard) break;
+        time.sleep(1)
+
+        # 4. ABRIR MENU (3 pontos = more_vert) DO CARD CORRETO
+        menu_result = driver.execute_script("""
+            var area = (arguments[0] || '').toLowerCase();
+            var cards = document.querySelectorAll('.box-fator');
+            var alvo = null;
+            for (var i = 0; i < cards.length; i++) {
+                if ((cards[i].innerText || '').toLowerCase().indexOf(area) !== -1) { alvo = cards[i]; break; }
             }
-            
-            // Estratégia 2: Se não encontrou, procurar o primeiro card visível na aba Manuais
-            if (!targetCard) {
-                var cards = document.querySelectorAll('[class*="card"], [class*="Card"]');
-                for (var k = 0; k < cards.length; k++) {
-                    var card = cards[k];
-                    var rect = card.getBoundingClientRect();
-                    if (rect.width > 100 && rect.width < 400 && rect.height > 50 && rect.height < 300) {
-                        if (rect.top > 100 && rect.left > 0) {
-                            targetCard = card;
-                            console.log('Card encontrado via classe card');
-                            break;
-                        }
-                    }
+            if (!alvo && cards.length === 1) alvo = cards[0];
+            if (!alvo) return 'card_nao_encontrado';
+            var nodes = alvo.querySelectorAll('*');
+            for (var j = 0; j < nodes.length; j++) {
+                if ((nodes[j].innerText || '').trim() === 'more_vert') {
+                    var r = nodes[j].getBoundingClientRect();
+                    var top = document.elementFromPoint(r.x + r.width/2, r.y + r.height/2);
+                    (top || nodes[j]).click();
+                    return 'menu_aberto';
                 }
             }
-            
-            if (!targetCard) {
-                return 'card_not_found';
-            }
-            
-            // Encontrar o botão de 3 pontos (menu)
-            var cardRect = targetCard.getBoundingClientRect();
-            var allClickables = targetCard.querySelectorAll('button, svg, [role="button"]');
-            
-            for (var m = 0; m < allClickables.length; m++) {
-                var btn = allClickables[m];
-                var btnRect = btn.getBoundingClientRect();
-                
-                // O botão de 3 pontos está no canto superior direito
-                if (btnRect.left > cardRect.left + cardRect.width * 0.5) {
-                    var clickTarget = btn.closest('button') || btn;
-                    clickTarget.click();
-                    return 'clicked: ' + clickTarget.tagName;
-                }
-            }
-            
-            // Fallback: clicar no último SVG do card (geralmente é o menu)
-            var svgs = targetCard.querySelectorAll('svg');
-            if (svgs.length > 0) {
-                var lastSvg = svgs[svgs.length - 1];
-                var parent = lastSvg.closest('button') || lastSvg.parentElement;
-                if (parent) {
-                    parent.click();
-                    return 'clicked_svg_parent';
-                }
-            }
-            
-            return 'button_not_found';
+            return 'menu_nao_encontrado';
         """, area_busca)
-        
-        print(f"Resultado clique menu: {click_result}")
-        time.sleep(0.3)
-        
-        # Clicar em "Editar" - usar elemento encontrado pelo Selenium e clicar com JavaScript
+        print(f"Menu card: {menu_result}")
+        time.sleep(0.5)
+
+        # 4.5. CLICAR EM "Editar" no dropdown
+        editar_result = driver.execute_script("""
+            var els = document.querySelectorAll('a, button, li, span, div');
+            for (var i = 0; i < els.length; i++) {
+                var t = (els[i].innerText || '').trim();
+                if ((t === 'Editar' || t.endsWith('Editar')) && els[i].children.length <= 1) {
+                    var r = els[i].getBoundingClientRect();
+                    if (r.width > 0 && r.width < 260 && r.height > 0) {
+                        var top = document.elementFromPoint(r.x + r.width/2, r.y + r.height/2);
+                        (top || els[i]).click();
+                        return 'editar_clicado';
+                    }
+                }
+            }
+            return 'editar_nao_encontrado';
+        """)
+        print(f"Editar: {editar_result}")
+
+        # 5. AGUARDAR o formulário de edição abrir (campo #nome_tarifa visível)
         try:
-            # Encontrar todos os elementos com texto "Editar"
-            editar_elements = driver.find_elements(By.XPATH, "//*[normalize-space(text())='Editar']")
-            
-            clicked = False
-            for el in editar_elements:
-                try:
-                    if el.is_displayed() and el.size['width'] > 0:
-                        # Usar JavaScript para forçar o clique
-                        driver.execute_script("arguments[0].click();", el)
-                        clicked = True
-                        print(f"Clicou em Editar via JS: {el.tag_name}")
-                        break
-                except:
-                    continue
-            
-            if not clicked:
-                # Tentar encontrar link <a> com href contendo "edit"
-                links = driver.find_elements(By.TAG_NAME, "a")
-                for link in links:
-                    if "Editar" in link.text:
-                        driver.execute_script("arguments[0].click();", link)
-                        print("Clicou em link Editar")
-                        break
-        except Exception as e:
-            print(f"Erro ao clicar em Editar: {e}")
-        
-        try:
-            wait.until(EC.presence_of_element_located((By.XPATH, "//button[contains(., 'Salvar')]")))
+            wait.until(EC.visibility_of_element_located((By.ID, "nome_tarifa")))
         except Exception:
-            pass
-        time.sleep(1.5)
-        
-        # DIAGNÓSTICO: capturar estrutura real do formulário de edição
+            raise Exception(
+                f"Formulário de edição não abriu (menu={menu_result}, editar={editar_result})"
+            )
+        time.sleep(0.5)
+
         form_debug = dump_form_estrutura(driver)
         print(f"FORM_DEBUG: {form_debug}")
-        
-        # 5. Preencher NOME DA ÁREA (obrigatório no formulário de edição TM)
+
+        # 6. Garantir Nome da área (#nome_tarifa) preenchido
         nome_area_result = preencher_nome_area(driver, wait, area_busca)
-        print(f"Nome área formulário: {nome_area_result}")
+        print(f"Nome área: {nome_area_result}")
+
+        # 7. ALTERAR O FATOR MULTIPLICADOR (#fator_tarifa)
+        mult_result = driver.execute_script("""
+            var valor = arguments[0];
+            var inp = document.querySelector('#fator_tarifa');
+            if (!inp) return 'fator_ausente';
+            var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            inp.focus();
+            setter.call(inp, valor);
+            inp.dispatchEvent(new Event('input', { bubbles: true }));
+            inp.dispatchEvent(new Event('change', { bubbles: true }));
+            inp.blur();
+            return 'fator_preenchido:' + inp.value;
+        """, str(request.multiplicador))
+        print(f"Multiplicador: {mult_result}")
         time.sleep(0.3)
 
-        # 6. ALTERAR O FATOR MULTIPLICADOR
-        # Usar Selenium para encontrar o input e simular digitação real
-        
-        # Encontrar o input do multiplicador (tipo number ou com valor numérico decimal)
-        mult_input = driver.execute_script("""
-            var inputs = document.querySelectorAll('input');
-            var multiplicadorInput = null;
-            
-            for (var i = 0; i < inputs.length; i++) {
-                var inp = inputs[i];
-                var rect = inp.getBoundingClientRect();
-                var type = inp.type || 'text';
-                var value = inp.value || '';
-                var placeholder = inp.placeholder || '';
-                var name = inp.name || '';
-                
-                // Ignorar inputs invisíveis ou especiais
-                if (rect.width <= 0 || rect.height <= 0) continue;
-                if (type === 'hidden' || type === 'checkbox' || type === 'radio') continue;
-                if (type === 'text' || type === 'search') continue;
-                
-                // Estratégia 1: Input do tipo number
-                if (type === 'number') {
-                    multiplicadorInput = inp;
-                    console.log('Encontrou input type=number');
-                    break;
-                }
-                
-                // Estratégia 2: Valor parece ser um multiplicador (1.0 a 3.0)
-                var numValue = parseFloat(value);
-                if (!isNaN(numValue) && numValue >= 1.0 && numValue <= 3.0 && value.includes('.')) {
-                    multiplicadorInput = inp;
-                    console.log('Encontrou input com valor multiplicador:', value);
-                    break;
-                }
-                
-                // Estratégia 3: Placeholder ou name contém "multiplicador" ou "fator"
-                var lowerPlaceholder = placeholder.toLowerCase();
-                var lowerName = name.toLowerCase();
-                if (lowerPlaceholder.includes('multiplicador') || lowerPlaceholder.includes('fator') ||
-                    lowerName.includes('multiplicador') || lowerName.includes('fator')) {
-                    multiplicadorInput = inp;
-                    console.log('Encontrou input por placeholder/name');
-                    break;
-                }
-            }
-            
-            // Fallback: pegar o segundo input visível que não seja o nome
-            if (!multiplicadorInput) {
-                var visibleInputs = [];
-                for (var j = 0; j < inputs.length; j++) {
-                    var inp2 = inputs[j];
-                    var rect2 = inp2.getBoundingClientRect();
-                    var type2 = inp2.type || 'text';
-                    if (rect2.width > 0 && rect2.height > 0 && type2 !== 'hidden' && type2 !== 'checkbox' && type2 !== 'radio') {
-                        visibleInputs.push(inp2);
-                    }
-                }
-                // O segundo input geralmente é o multiplicador
-                if (visibleInputs.length >= 2) {
-                    multiplicadorInput = visibleInputs[1];
-                    console.log('Usando fallback: segundo input visível');
-                }
-            }
-            
-            return multiplicadorInput;
-        """)
-        
-        if mult_input:
-            # Limpar o campo usando JavaScript e preencher
-            driver.execute_script("""
-                var input = arguments[0];
-                var value = arguments[1];
-                input.focus();
-                input.select();
-                // Limpar usando execCommand
-                document.execCommand('selectAll', false, null);
-                document.execCommand('delete', false, null);
-            """, mult_input, str(request.multiplicador))
-            time.sleep(0.1)
-            
-            # Digitar o novo valor usando send_keys
-            mult_input.send_keys(str(request.multiplicador))
-            
-            # Disparar eventos para frameworks reativos
-            driver.execute_script("""
-                var input = arguments[0];
-                var value = arguments[1];
-                
-                // Criar e disparar InputEvent (mais compatível com React/Vue)
-                var inputEvent = new InputEvent('input', {
-                    bubbles: true,
-                    cancelable: true,
-                    inputType: 'insertText',
-                    data: value
-                });
-                input.dispatchEvent(inputEvent);
-                
-                // Disparar change event
-                var changeEvent = new Event('change', { bubbles: true });
-                input.dispatchEvent(changeEvent);
-                
-                // Blur para finalizar
-                input.blur();
-            """, mult_input, str(request.multiplicador))
-            
-            print(f"Preencheu multiplicador: {request.multiplicador}")
-        else:
-            print("Não encontrou campo de multiplicador")
-        
-        time.sleep(0.5)
-        
-        # 5.5. VERIFICAR TOGGLE NA TELA DE EDIÇÃO
-        # Se multiplicador for 1.0 ou 1.1 -> DESATIVAR toggle
-        # Caso contrário -> ATIVAR toggle
         deve_desativar = request.multiplicador <= 1.1
-        
-        toggle_ativado = driver.execute_script("""
-            var deveDesativar = arguments[0];
-            // Procurar toggle/switch na tela de edição
-            var switches = document.querySelectorAll('[role="switch"], [data-state], input[type="checkbox"]');
-            console.log('Switches encontrados na tela de edição:', switches.length);
-            console.log('Deve desativar (mult <= 1.1):', deveDesativar);
-            
-            for (var i = 0; i < switches.length; i++) {
-                var sw = switches[i];
-                var rect = sw.getBoundingClientRect();
-                if (rect.width <= 0 || rect.height <= 0) continue;
-                
-                var ariaChecked = sw.getAttribute('aria-checked');
-                var dataState = sw.getAttribute('data-state');
-                var isChecked = sw.checked;
-                var estaAtivo = ariaChecked === 'true' || dataState === 'checked' || dataState === 'on' || isChecked === true;
-                
-                console.log('Toggle edição - aria-checked:', ariaChecked, 'data-state:', dataState, 'checked:', isChecked, 'estaAtivo:', estaAtivo);
-                
-                if (deveDesativar) {
-                    // MULTIPLICADOR 1.0 ou 1.1: Queremos DESATIVAR
-                    if (estaAtivo) {
-                        console.log('Toggle na edição ATIVO - CLICANDO PARA DESATIVAR (mult <= 1.1)');
-                        sw.click();
-                        return 'desativado';
-                    } else {
-                        console.log('Toggle na edição JÁ ESTÁ INATIVO - NÃO CLICAR');
-                        return 'ja_inativo';
-                    }
-                } else {
-                    // MULTIPLICADOR > 1.1: Queremos ATIVAR
-                    if (estaAtivo) {
-                        console.log('Toggle na edição JÁ ESTÁ ATIVO - NÃO CLICAR');
-                        return 'ja_ativo';
-                    } else {
-                        console.log('Toggle na edição INATIVO - CLICANDO PARA ATIVAR');
-                        sw.click();
-                        return 'ativado';
+
+        # 8. SALVAR (#btn-salvar)
+        def clicar_salvar():
+            return driver.execute_script("""
+                var b = document.querySelector('#btn-salvar');
+                if (!b) {
+                    var bs = document.querySelectorAll('button');
+                    for (var i = 0; i < bs.length; i++) {
+                        if ((bs[i].innerText || '').indexOf('Salvar') !== -1) { b = bs[i]; break; }
                     }
                 }
-            }
-            return 'nao_encontrado';
-        """, deve_desativar)
-        print(f"Toggle na edição: {toggle_ativado} (deve_desativar={deve_desativar})")
-        
-        time.sleep(0.3)
-        
-        # Reforçar nome da área imediatamente antes de salvar
-        nome_area_result2 = preencher_nome_area(driver, wait, area_busca)
-        print(f"Nome área antes de salvar: {nome_area_result2}")
-        time.sleep(0.2)
-        
-        # 6. SALVAR ALTERAÇÕES - Encontrar e clicar no botão
-        def clicar_salvar():
-            try:
-                salvar_btn = driver.find_element(By.XPATH, "//button[contains(text(), 'Salvar')]")
-                driver.execute_script("arguments[0].click();", salvar_btn)
-                print("Clicou em Salvar")
-            except Exception:
-                driver.execute_script("""
-                    document.querySelectorAll('button').forEach(function(btn) {
-                        if (btn.innerText && btn.innerText.includes('Salvar')) {
-                            btn.click();
-                        }
-                    });
-                """)
-                print("Clicou em Salvar via fallback JS")
+                if (!b) return 'btn_salvar_ausente';
+                var r = b.getBoundingClientRect();
+                var top = document.elementFromPoint(r.x + r.width/2, r.y + r.height/2);
+                (top || b).click();
+                return 'salvar_clicado';
+            """)
 
         try:
-            clicar_salvar()
+            print(f"Salvar: {clicar_salvar()}")
         except UnexpectedAlertPresentException:
             print("Alert ao salvar — preenchendo nome da área e tentando novamente")
             try:
                 driver.switch_to.alert.accept()
             except Exception:
                 pass
-            js_preencher_nome_area(driver, area_busca)
             preencher_nome_area(driver, wait, area_busca)
             time.sleep(0.3)
             clicar_salvar()
-        
-        time.sleep(1)  # OTIMIZADO: 2s -> 1s
+
+        time.sleep(1.5)
         
         # 7. ENVIAR NOTIFICAÇÃO PARA WEBHOOK N8N (logo após salvar)
         try:
@@ -1127,182 +862,68 @@ Status atual: {hora_atual}
         except Exception as webhook_error:
             print(f"Erro ao enviar webhook n8n: {webhook_error}")
         
-        # 8. ATIVAR A DINÂMICA - Voltar para lista, buscar ***Geral e ativar toggle
-        
-        # Navegar de volta para a lista de dinâmicas
+        # 9. ATIVAR/DESATIVAR A DINÂMICA - Voltar para lista, buscar área e clicar no toggle do card
         driver.get("https://cloud.taximachine.com.br/tarifaCategoria/dinamica")
-        time.sleep(1.5)  # OTIMIZADO: 3s -> 1.5s
-        
+        time.sleep(1.5)
+
+        for _ in range(5):
+            acoes = dismiss_onboarding(driver)
+            if acoes in ("nenhum", "") or str(acoes).startswith("dismiss_erro"):
+                break
+            time.sleep(0.4)
+
         # Clicar na aba Manuais
         driver.execute_script("""
+            var alvo = null;
             document.querySelectorAll('button, a, span, div').forEach(function(el) {
-                if (el.innerText && el.innerText.trim() === 'Manuais') {
-                    el.click();
-                }
+                if (!alvo && (el.innerText || '').trim() === 'Manuais') alvo = el;
             });
+            if (alvo) alvo.click();
         """)
-        time.sleep(0.5)  # OTIMIZADO: 1s -> 0.5s
-        
-        # Buscar termo de área novamente para encontrar o card
+        time.sleep(0.8)
+
+        # Buscar a área novamente
         driver.execute_script("""
             var areaBusca = arguments[0];
-            var inputs = document.querySelectorAll('input');
-            for (var i = 0; i < inputs.length; i++) {
-                var inp = inputs[i];
-                var rect = inp.getBoundingClientRect();
-                var type = inp.type || 'text';
-                if (rect.width > 0 && rect.height > 0 && type !== 'hidden' && type !== 'checkbox' && type !== 'radio' && type !== 'number') {
-                    inp.focus();
-                    inp.value = areaBusca;
-                    inp.dispatchEvent(new Event('input', { bubbles: true }));
-                    inp.dispatchEvent(new Event('change', { bubbles: true }));
-                    break;
-                }
-            }
+            var inp = document.querySelector('input[placeholder*="Buscar"]');
+            if (!inp) return;
+            var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            inp.focus();
+            setter.call(inp, areaBusca);
+            inp.dispatchEvent(new Event('input', { bubbles: true }));
+            inp.dispatchEvent(new Event('change', { bubbles: true }));
         """, area_busca)
-        print(f"Buscou '{area_busca}' para ativar toggle")
-        time.sleep(1)  # OTIMIZADO: 2s -> 1s
-        
-        # FECHAR MODAL SE ESTIVER ABERTO (modal "Dinâmica automática")
-        driver.execute_script("""
-            // Fechar qualquer modal aberto
-            var closeButtons = document.querySelectorAll('button[aria-label="Close"], .close, [data-dismiss="modal"], button');
-            for (var i = 0; i < closeButtons.length; i++) {
-                var btn = closeButtons[i];
-                var text = btn.innerText || '';
-                var ariaLabel = btn.getAttribute('aria-label') || '';
-                
-                // Procurar X de fechar ou botão com ×
-                if (text === '×' || text === 'x' || text === 'X' || ariaLabel.toLowerCase().includes('close')) {
-                    btn.click();
-                    console.log('Modal fechado');
-                    break;
-                }
-            }
-            
-            // Também tentar clicar fora do modal
-            var modals = document.querySelectorAll('.modal-backdrop, .modal');
-            modals.forEach(function(m) {
-                if (m.classList.contains('modal-backdrop')) {
-                    m.click();
-                }
-            });
-        """)
-        time.sleep(0.5)
-        
-        # Encontrar e verificar o toggle do card ***Geral Manual
-        # Se multiplicador <= 1.1 -> DESATIVAR toggle
-        # Caso contrário -> ATIVAR toggle
-        
+        print(f"Buscou '{area_busca}' para ajustar toggle")
+        time.sleep(1)
+
+        # Ler estado do toggle (input.checkbox dentro de label.switch) do card alvo e clicar se necessário
         toggle_result = driver.execute_script("""
-            var deveDesativar = arguments[0];
-            console.log('=== VERIFICANDO TOGGLE ***GERAL MANUAL ===');
-            console.log('Deve desativar (mult <= 1.1):', deveDesativar);
-            
-            // Procurar por elementos com role="switch" ou data-state (padrão comum de toggles)
-            var switches = document.querySelectorAll('[role="switch"], [data-state], input[type="checkbox"]');
-            console.log('Switches encontrados:', switches.length);
-            
-            for (var i = 0; i < switches.length; i++) {
-                var sw = switches[i];
-                var rect = sw.getBoundingClientRect();
-                
-                // Ignorar elementos invisíveis
-                if (rect.width <= 0 || rect.height <= 0) continue;
-                if (rect.top < 300) continue; // Ignorar elementos no topo (header)
-                
-                var ariaChecked = sw.getAttribute('aria-checked');
-                var dataState = sw.getAttribute('data-state');
-                var isChecked = sw.checked;
-                var estaAtivo = ariaChecked === 'true' || dataState === 'checked' || dataState === 'on' || isChecked === true;
-                
-                console.log('Switch encontrado - aria-checked:', ariaChecked, 'data-state:', dataState, 'checked:', isChecked, 'estaAtivo:', estaAtivo);
-                
-                if (deveDesativar) {
-                    // MULTIPLICADOR 1.0 ou 1.1: Queremos DESATIVAR
-                    if (estaAtivo) {
-                        console.log('>>> TOGGLE ATIVO - CLICANDO PARA DESATIVAR (mult <= 1.1)');
-                        sw.click();
-                        return 'toggle_desativado';
-                    } else {
-                        console.log('>>> TOGGLE JÁ ESTÁ INATIVO - NÃO CLICAR');
-                        return 'toggle_ja_inativo';
-                    }
-                } else {
-                    // MULTIPLICADOR > 1.1: Queremos ATIVAR
-                    if (estaAtivo) {
-                        console.log('>>> TOGGLE JÁ ESTÁ ATIVO - NÃO CLICAR');
-                        return 'toggle_ja_ativo';
-                    } else {
-                        console.log('>>> TOGGLE INATIVO - CLICANDO PARA ATIVAR');
-                        sw.click();
-                        return 'toggle_ativado';
-                    }
-                }
+            var area = (arguments[0] || '').toLowerCase();
+            var deveDesativar = arguments[1];
+            var cards = document.querySelectorAll('.box-fator');
+            var alvo = null;
+            for (var i = 0; i < cards.length; i++) {
+                if ((cards[i].innerText || '').toLowerCase().indexOf(area) !== -1) { alvo = cards[i]; break; }
             }
-            
-            // Fallback: Procurar por elementos visuais que parecem toggles
-            var allElements = document.querySelectorAll('button, div, span');
-            
-            for (var j = 0; j < allElements.length; j++) {
-                var el = allElements[j];
-                var rect = el.getBoundingClientRect();
-                var style = window.getComputedStyle(el);
-                var bgColor = style.backgroundColor;
-                var borderRadius = style.borderRadius;
-                
-                // Toggle típico: largura 30-50px, altura 15-30px, borda arredondada
-                if (rect.width >= 30 && rect.width <= 60 && 
-                    rect.height >= 15 && rect.height <= 35 &&
-                    rect.top > 300 &&
-                    borderRadius && parseInt(borderRadius) >= 8) {
-                    
-                    // Verificar cor de fundo para determinar estado
-                    var rgbMatch = bgColor.match(/rgb[a]?\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/);
-                    if (rgbMatch) {
-                        var r = parseInt(rgbMatch[1]);
-                        var g = parseInt(rgbMatch[2]);
-                        var b = parseInt(rgbMatch[3]);
-                        
-                        console.log('Toggle visual encontrado - RGB:', r, g, b);
-                        
-                        // VERDE ou AZUL = ATIVO
-                        var corAtiva = (g > 100 && g > r) || (b > 100 && b > r && b > g);
-                        // CINZA = INATIVO
-                        var maxDiff = Math.max(Math.abs(r-g), Math.abs(g-b), Math.abs(r-b));
-                        var corInativa = maxDiff < 40 && r < 200;
-                        
-                        if (deveDesativar) {
-                            // MULTIPLICADOR 1.0 ou 1.1: Queremos DESATIVAR
-                            if (corAtiva) {
-                                console.log('>>> TOGGLE COLORIDO (ativo) - CLICANDO PARA DESATIVAR (mult <= 1.1)');
-                                el.click();
-                                return 'toggle_desativado';
-                            } else if (corInativa) {
-                                console.log('>>> TOGGLE CINZA (inativo) - JÁ ESTÁ DESATIVADO');
-                                return 'toggle_ja_inativo_cor';
-                            }
-                        } else {
-                            // MULTIPLICADOR > 1.1: Queremos ATIVAR
-                            if (corAtiva) {
-                                console.log('>>> TOGGLE COLORIDO (ativo) - NÃO CLICAR');
-                                return 'toggle_ja_ativo_cor';
-                            } else if (corInativa) {
-                                console.log('>>> TOGGLE CINZA (inativo) - CLICANDO PARA ATIVAR');
-                                el.click();
-                                return 'toggle_ativado';
-                            }
-                        }
-                    }
-                }
+            if (!alvo && cards.length === 1) alvo = cards[0];
+            if (!alvo) return 'card_nao_encontrado';
+
+            var chk = alvo.querySelector('input[type="checkbox"]');
+            var lbl = alvo.querySelector('label.switch') || (chk ? chk.closest('label') : null);
+            if (!chk || !lbl) return 'toggle_nao_encontrado';
+
+            var estaAtivo = chk.checked === true;
+            if (deveDesativar) {
+                if (estaAtivo) { lbl.click(); return 'toggle_desativado'; }
+                return 'toggle_ja_inativo';
+            } else {
+                if (!estaAtivo) { lbl.click(); return 'toggle_ativado'; }
+                return 'toggle_ja_ativo';
             }
-            
-            console.log('Nenhum toggle encontrado ou não foi possível determinar estado');
-            return 'toggle_nao_encontrado_ou_indeterminado';
-        """, deve_desativar)
-        
+        """, area_busca, deve_desativar)
+
         print(f"Toggle resultado: {toggle_result} (deve_desativar={deve_desativar})")
-        time.sleep(2)  # Aumentado para Render
+        time.sleep(2)
         
         # Screenshot final
         screenshot_path = os.path.join(screenshots_dir, f"dinamica_sucesso_{int(time.time())}.png")
