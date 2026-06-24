@@ -416,7 +416,7 @@ async def health():
         "memory_mb": round(memory_mb, 2),
         "active_executions": active_executions,
         "mode": "parallel",
-        "version": "3.4.0-criar-area"
+        "version": "3.4.1-login-entrar"
     }
 
 @app.post("/driver/close")
@@ -1010,31 +1010,36 @@ Status atual: {hora_atual}
             screenshot_path=screenshot_path
         )
 
-def _login_se_preciso(driver, wait, email: str, password: str) -> bool:
-    """Garante login no TaxiMachine Cloud. Retorna True se logado."""
+def _login_se_preciso(driver, wait, email: str, password: str):
+    """
+    Garante login no TaxiMachine Cloud (página /site/login, sem <form>, botão #entrar, login via AJAX).
+    Retorna (sucesso: bool, detalhe: str).
+    """
     if "login" not in driver.current_url.lower():
-        return True
+        return True, ""
 
+    # Campo de e-mail
     email_field = None
     for by, sel in [
+        (By.ID, "LoginForm_username"),
         (By.NAME, "LoginForm[username]"),
         (By.CSS_SELECTOR, "input[type='email']"),
-        (By.CSS_SELECTOR, "input[name='email']"),
         (By.CSS_SELECTOR, "input.form-control[type='text']"),
     ]:
         try:
-            email_field = wait.until(EC.presence_of_element_located((by, sel)))
+            email_field = WebDriverWait(driver, 15).until(EC.presence_of_element_located((by, sel)))
             if email_field:
                 break
         except Exception:
             continue
     if not email_field:
-        return False
+        return False, f"campo_usuario_nao_encontrado url={driver.current_url}"
     email_field.clear()
     email_field.send_keys(email)
 
+    # Campo de senha
     password_field = None
-    for by, sel in [(By.NAME, "LoginForm[password]"), (By.CSS_SELECTOR, "input[type='password']")]:
+    for by, sel in [(By.ID, "LoginForm_password"), (By.NAME, "LoginForm[password]"), (By.CSS_SELECTOR, "input[type='password']")]:
         try:
             password_field = driver.find_element(by, sel)
             if password_field:
@@ -1042,27 +1047,50 @@ def _login_se_preciso(driver, wait, email: str, password: str) -> bool:
         except Exception:
             continue
     if not password_field:
-        return False
+        return False, "campo_senha_nao_encontrado"
     password_field.clear()
     password_field.send_keys(password)
-    time.sleep(0.5)
+    time.sleep(0.4)
 
-    login_button = None
-    for by, sel in [(By.XPATH, "//button[contains(text(), 'Entrar')]"), (By.CSS_SELECTOR, "button[type='submit']")]:
-        try:
-            login_button = driver.find_element(by, sel)
-            if login_button and login_button.is_displayed():
-                break
-        except Exception:
-            continue
-    if login_button:
-        driver.execute_script("arguments[0].click();", login_button)
-    else:
-        driver.execute_script(
-            "var b=document.querySelector('button[type=\"submit\"]')||document.querySelector('button'); if(b)b.click();"
-        )
-    time.sleep(1.5)
-    return "login" not in driver.current_url.lower()
+    # Clicar especificamente no botão "Entrar" (#entrar) — nunca em outro botão da página
+    clicado = driver.execute_script("""
+        var b = document.querySelector('#entrar');
+        if (!b) {
+            var bs = document.querySelectorAll('button');
+            for (var i = 0; i < bs.length; i++) {
+                if ((bs[i].innerText || '').trim() === 'Entrar') { b = bs[i]; break; }
+            }
+        }
+        if (b) { b.click(); return true; }
+        return false;
+    """)
+    if not clicado:
+        return False, "botao_entrar_nao_encontrado"
+
+    # Login é via AJAX: aguardar sair da página de login (até ~15s)
+    for _ in range(15):
+        time.sleep(1)
+        if "login" not in driver.current_url.lower():
+            return True, ""
+
+    # Ainda na página de login -> coletar diagnóstico (erros visíveis / 2FA)
+    try:
+        diag = driver.execute_script("""
+            var errs = [];
+            document.querySelectorAll('.help-block.error, .error, .alert, .toast, .um-mensagem, .mensagem').forEach(function(e){
+                var t = (e.innerText || '').trim();
+                if (t) errs.push(t);
+            });
+            return JSON.stringify({
+                url: location.href,
+                title: document.title,
+                mfa: !!document.querySelector('.mfa__panel, #codigo-cadastro-2fa, [class*="mfa__"]'),
+                errs: errs.slice(0, 5)
+            });
+        """)
+    except Exception as e:
+        diag = f"sem_diagnostico ({e})"
+    return False, f"ainda_na_pagina_login {diag}"
 
 
 @app.post("/dinamica/criar-area", response_model=CriarAreaResponse)
@@ -1148,11 +1176,13 @@ async def criar_area_dinamica(request: CriarAreaRequest):
             driver.get("https://cloud.taximachine.com.br/tarifaCategoria/dinamica")
             time.sleep(1)
 
-        if not _login_se_preciso(driver, wait, request.email, request.password):
+        login_ok, login_detalhe = _login_se_preciso(driver, wait, request.email, request.password)
+        if not login_ok:
             force_close_driver(request.email)
             with executions_lock:
                 active_executions -= 1
-            return CriarAreaResponse(success=False, message="Falha no login")
+            print(f"Falha no login ({request.email}): {login_detalhe}")
+            return CriarAreaResponse(success=False, message="Falha no login", detalhe=login_detalhe)
 
         driver.get("https://cloud.taximachine.com.br/tarifaCategoria/dinamica")
         time.sleep(1.2)
