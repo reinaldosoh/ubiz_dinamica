@@ -708,7 +708,72 @@ async def atualizar_dinamica(request: DinamicaRequest):
         
         time.sleep(0.8)  # OTIMIZADO: 1.5s -> 0.8s
         
-        # 5. ALTERAR O FATOR MULTIPLICADOR
+        # 5. Preencher NOME DA ÁREA (obrigatório no formulário de edição TM)
+        nome_area_result = driver.execute_script("""
+            var areaNome = arguments[0];
+            var inputs = document.querySelectorAll('input, textarea');
+
+            function labelText(inp) {
+                if (inp.id) {
+                    var lbl = document.querySelector('label[for="' + inp.id + '"]');
+                    if (lbl) return (lbl.innerText || lbl.textContent || '').toLowerCase();
+                }
+                var parent = inp.closest('div, label, fieldset');
+                if (parent) {
+                    var lbl2 = parent.querySelector('label');
+                    if (lbl2) return (lbl2.innerText || lbl2.textContent || '').toLowerCase();
+                }
+                return '';
+            }
+
+            function preencher(inp, valor) {
+                inp.focus();
+                inp.value = valor;
+                inp.dispatchEvent(new Event('input', { bubbles: true }));
+                inp.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+
+            for (var i = 0; i < inputs.length; i++) {
+                var inp = inputs[i];
+                var rect = inp.getBoundingClientRect();
+                var type = (inp.type || 'text').toLowerCase();
+                if (rect.width <= 0 || rect.height <= 0) continue;
+                if (type === 'hidden' || type === 'checkbox' || type === 'radio' || type === 'number') continue;
+
+                var label = labelText(inp);
+                var placeholder = (inp.placeholder || '').toLowerCase();
+                var name = (inp.name || '').toLowerCase();
+                var pareceNomeArea =
+                    (label.includes('nome') && (label.includes('área') || label.includes('area'))) ||
+                    (placeholder.includes('nome') && (placeholder.includes('área') || placeholder.includes('area'))) ||
+                    (name.includes('nome') && (name.includes('area') || name.includes('área')));
+
+                if (pareceNomeArea) {
+                    preencher(inp, areaNome);
+                    return 'nome_area_label:' + areaNome;
+                }
+            }
+
+            // Fallback: primeiro input text visível (geralmente é o nome da área)
+            var visibleText = [];
+            for (var j = 0; j < inputs.length; j++) {
+                var inp2 = inputs[j];
+                var rect2 = inp2.getBoundingClientRect();
+                var type2 = (inp2.type || 'text').toLowerCase();
+                if (rect2.width <= 0 || rect2.height <= 0) continue;
+                if (type2 === 'hidden' || type2 === 'checkbox' || type2 === 'radio' || type2 === 'number') continue;
+                visibleText.push(inp2);
+            }
+            if (visibleText.length >= 1) {
+                preencher(visibleText[0], areaNome);
+                return 'nome_area_primeiro_text:' + areaNome;
+            }
+            return 'nome_area_nao_encontrado';
+        """, area_busca)
+        print(f"Nome área formulário: {nome_area_result}")
+        time.sleep(0.3)
+
+        # 6. ALTERAR O FATOR MULTIPLICADOR
         # Usar Selenium para encontrar o input e simular digitação real
         
         # Encontrar o input do multiplicador (tipo number ou com valor numérico decimal)
@@ -727,6 +792,7 @@ async def atualizar_dinamica(request: DinamicaRequest):
                 // Ignorar inputs invisíveis ou especiais
                 if (rect.width <= 0 || rect.height <= 0) continue;
                 if (type === 'hidden' || type === 'checkbox' || type === 'radio') continue;
+                if (type === 'text' || type === 'search') continue;
                 
                 // Estratégia 1: Input do tipo number
                 if (type === 'number') {
