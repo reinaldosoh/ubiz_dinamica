@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Any
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -360,6 +360,28 @@ class DinamicaResponse(BaseModel):
     multiplicador_aplicado: Optional[float] = None
     screenshot_path: Optional[str] = None
 
+class CriarAreaRequest(BaseModel):
+    email: str
+    password: str
+    cidade: str = "Não informada"
+    estado: str = "Não informado"
+    nome_area: str
+    tipo_calculo: str = "M"                  # M = fator multiplicador, F = valor adicional
+    fator: Optional[float] = None            # usado quando tipo_calculo = M (1.1 a 5.0)
+    valor_adicional: Optional[float] = None  # usado quando tipo_calculo = F (0.50 a 5.00)
+    tipo_fator: str = "P"                    # P = embarque, R = destino
+    vertices: Optional[Any] = None           # [{"lat":..,"lng":..}, ...] ou "lat,lng;lat,lng;..."
+    cor_preenchimento: str = "#ff0000"
+    bandeira_id: Optional[int] = None        # se None, lê bandeiraBusca da página (aba Manuais)
+    headless: bool = True
+
+class CriarAreaResponse(BaseModel):
+    success: bool
+    message: str
+    area_id: Optional[Any] = None
+    fator_id: Optional[Any] = None
+    detalhe: Optional[Any] = None
+
 def create_driver(headless: bool = True):
     """Cria e configura o driver do Chrome/Chromium"""
     import os
@@ -394,7 +416,7 @@ async def health():
         "memory_mb": round(memory_mb, 2),
         "active_executions": active_executions,
         "mode": "parallel",
-        "version": "3.3.0-area-default-manual"
+        "version": "3.4.0-criar-area"
     }
 
 @app.post("/driver/close")
@@ -987,6 +1009,241 @@ Status atual: {hora_atual}
             message=f"Erro geral: {str(e)} | FORM_DEBUG: {form_debug}",
             screenshot_path=screenshot_path
         )
+
+def _login_se_preciso(driver, wait, email: str, password: str) -> bool:
+    """Garante login no TaxiMachine Cloud. Retorna True se logado."""
+    if "login" not in driver.current_url.lower():
+        return True
+
+    email_field = None
+    for by, sel in [
+        (By.NAME, "LoginForm[username]"),
+        (By.CSS_SELECTOR, "input[type='email']"),
+        (By.CSS_SELECTOR, "input[name='email']"),
+        (By.CSS_SELECTOR, "input.form-control[type='text']"),
+    ]:
+        try:
+            email_field = wait.until(EC.presence_of_element_located((by, sel)))
+            if email_field:
+                break
+        except Exception:
+            continue
+    if not email_field:
+        return False
+    email_field.clear()
+    email_field.send_keys(email)
+
+    password_field = None
+    for by, sel in [(By.NAME, "LoginForm[password]"), (By.CSS_SELECTOR, "input[type='password']")]:
+        try:
+            password_field = driver.find_element(by, sel)
+            if password_field:
+                break
+        except Exception:
+            continue
+    if not password_field:
+        return False
+    password_field.clear()
+    password_field.send_keys(password)
+    time.sleep(0.5)
+
+    login_button = None
+    for by, sel in [(By.XPATH, "//button[contains(text(), 'Entrar')]"), (By.CSS_SELECTOR, "button[type='submit']")]:
+        try:
+            login_button = driver.find_element(by, sel)
+            if login_button and login_button.is_displayed():
+                break
+        except Exception:
+            continue
+    if login_button:
+        driver.execute_script("arguments[0].click();", login_button)
+    else:
+        driver.execute_script(
+            "var b=document.querySelector('button[type=\"submit\"]')||document.querySelector('button'); if(b)b.click();"
+        )
+    time.sleep(1.5)
+    return "login" not in driver.current_url.lower()
+
+
+@app.post("/dinamica/criar-area", response_model=CriarAreaResponse)
+async def criar_area_dinamica(request: CriarAreaRequest):
+    """
+    Cria uma nova ÁREA de dinâmica manual no TaxiMachine Cloud, sem afetar as
+    dinâmicas existentes. Reutiliza a sessão logada e chama o endpoint interno
+    /tarifaCategoria/criarAreaDinamica via jQuery (mesma chamada do botão Salvar).
+    """
+    global active_executions
+    with executions_lock:
+        active_executions += 1
+
+    print(f"=== CRIAR AREA ({request.cidade}/{request.estado}) nome='{request.nome_area}' "
+          f"tipo_calculo={request.tipo_calculo} tipo_fator={request.tipo_fator} ===")
+
+    if not request.email or not request.password:
+        with executions_lock:
+            active_executions -= 1
+        raise HTTPException(status_code=400, detail="email e password são obrigatórios")
+    if not request.nome_area or not request.nome_area.strip():
+        with executions_lock:
+            active_executions -= 1
+        raise HTTPException(status_code=400, detail="nome_area é obrigatório")
+
+    # Normalizar vertices -> "lat,lng;lat,lng;..."
+    vert = request.vertices
+    if isinstance(vert, str):
+        vertices_str = vert.strip()
+    else:
+        partes = []
+        for v in (vert or []):
+            if isinstance(v, dict):
+                lat, lng = v.get("lat"), v.get("lng")
+            elif isinstance(v, (list, tuple)) and len(v) >= 2:
+                lat, lng = v[0], v[1]
+            else:
+                continue
+            if lat is None or lng is None:
+                continue
+            partes.append(f"{lat},{lng};")
+        vertices_str = "".join(partes)
+
+    if not vertices_str or vertices_str.count(";") < 3:
+        with executions_lock:
+            active_executions -= 1
+        raise HTTPException(status_code=400, detail="vertices inválidos (mínimo 3 pontos)")
+
+    tipo_calculo = (request.tipo_calculo or "M").upper()
+    if tipo_calculo not in ("M", "F"):
+        tipo_calculo = "M"
+
+    if tipo_calculo == "F":
+        fator_area = None
+        valor = request.valor_adicional if request.valor_adicional is not None else request.fator
+        if valor is None:
+            with executions_lock:
+                active_executions -= 1
+            raise HTTPException(status_code=400, detail="valor_adicional é obrigatório para tipo_calculo=F")
+        valor_adicional = f"{float(valor):.2f}"
+    else:
+        valor_adicional = None
+        fator_val = request.fator if request.fator is not None else request.valor_adicional
+        if fator_val is None:
+            with executions_lock:
+                active_executions -= 1
+            raise HTTPException(status_code=400, detail="fator é obrigatório para tipo_calculo=M")
+        fator_area = str(fator_val)
+
+    tipo_fator = (request.tipo_fator or "P").upper()
+    if tipo_fator not in ("P", "R"):
+        tipo_fator = "P"
+
+    driver = None
+    try:
+        driver, is_new_driver = get_or_create_driver(request.email, headless=request.headless)
+        wait = WebDriverWait(driver, 20)
+
+        if is_new_driver:
+            driver.get("https://cloud.taximachine.com.br/site/login")
+            time.sleep(1)
+        else:
+            driver.get("https://cloud.taximachine.com.br/tarifaCategoria/dinamica")
+            time.sleep(1)
+
+        if not _login_se_preciso(driver, wait, request.email, request.password):
+            force_close_driver(request.email)
+            with executions_lock:
+                active_executions -= 1
+            return CriarAreaResponse(success=False, message="Falha no login")
+
+        driver.get("https://cloud.taximachine.com.br/tarifaCategoria/dinamica")
+        time.sleep(1.2)
+
+        # Garantir aba "Manuais" para que bandeiraBusca aponte para a bandeira manual
+        driver.execute_script("""
+            var alvo = null;
+            document.querySelectorAll('button, a, span, div').forEach(function(el) {
+                if (!alvo && (el.innerText || '').trim() === 'Manuais') alvo = el;
+            });
+            if (alvo) alvo.click();
+        """)
+        time.sleep(0.8)
+
+        bandeira = request.bandeira_id
+        if not bandeira:
+            bandeira = driver.execute_script(
+                "return (typeof bandeiraBusca !== 'undefined') ? bandeiraBusca : null;"
+            )
+
+        driver.set_script_timeout(30)
+        resultado = driver.execute_async_script("""
+            var payload = arguments[0];
+            var cb = arguments[arguments.length - 1];
+            try {
+                if (typeof jQuery === 'undefined') { cb({ok:false, error:'jquery_ausente'}); return; }
+                jQuery.ajax({
+                    url: '/tarifaCategoria/criarAreaDinamica',
+                    method: 'POST',
+                    timeout: 20000,
+                    data: {
+                        nome_area: payload.nome_area,
+                        fator_area: payload.fator_area,
+                        valor_adicional: payload.valor_adicional,
+                        bandeira_id: payload.bandeira_id,
+                        tipo_fator: payload.tipo_fator,
+                        vertices: payload.vertices,
+                        cor_preenchimento: payload.cor_preenchimento,
+                        tipo_calculo: payload.tipo_calculo
+                    }
+                })
+                .done(function (data) { cb({ok:true, data:data}); })
+                .fail(function (e) {
+                    var msg = '';
+                    if (e.responseJSON && e.responseJSON.errors && e.responseJSON.errors.length) msg = e.responseJSON.errors[0];
+                    else if (e.responseText) msg = e.responseText;
+                    else msg = 'erro_conexao';
+                    cb({ok:false, error:msg, status:e.status});
+                });
+            } catch (err) { cb({ok:false, error:String(err)}); }
+        """, {
+            "nome_area": request.nome_area.strip(),
+            "fator_area": fator_area,
+            "valor_adicional": valor_adicional,
+            "bandeira_id": bandeira,
+            "tipo_fator": tipo_fator,
+            "vertices": vertices_str,
+            "cor_preenchimento": request.cor_preenchimento or "#ff0000",
+            "tipo_calculo": tipo_calculo,
+        })
+
+        release_driver(request.email)
+        with executions_lock:
+            active_executions -= 1
+
+        if resultado and resultado.get("ok"):
+            data = resultado.get("data") or {}
+            print(f"Área criada: area_id={data.get('area_id')} fator_id={data.get('fator_id')}")
+            return CriarAreaResponse(
+                success=True,
+                message="Área criada com sucesso",
+                area_id=data.get("area_id"),
+                fator_id=data.get("fator_id"),
+                detalhe=data,
+            )
+        else:
+            erro = (resultado or {}).get("error")
+            print(f"Falha ao criar área: {erro}")
+            return CriarAreaResponse(
+                success=False,
+                message=f"Erro ao criar área: {erro}",
+                detalhe=resultado,
+            )
+
+    except Exception as e:
+        force_close_driver(request.email)
+        with executions_lock:
+            active_executions -= 1
+        gc.collect()
+        return CriarAreaResponse(success=False, message=f"Erro geral: {str(e)}")
+
 
 if __name__ == "__main__":
     import uvicorn
