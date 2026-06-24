@@ -394,7 +394,7 @@ async def health():
         "memory_mb": round(memory_mb, 2),
         "active_executions": active_executions,
         "mode": "parallel",
-        "version": "3.1.0-editar-classe"
+        "version": "3.1.1-menu-dump"
     }
 
 @app.post("/driver/close")
@@ -746,8 +746,21 @@ async def atualizar_dinamica(request: DinamicaRequest):
         try:
             wait.until(EC.visibility_of_element_located((By.ID, "nome_tarifa")))
         except Exception:
+            menu_dump = driver.execute_script("""
+                var out = [];
+                var els = document.querySelectorAll('a, li, button, [class*="dropdown"]');
+                for (var i = 0; i < els.length; i++) {
+                    var e = els[i];
+                    var t = (e.innerText || e.textContent || '').trim();
+                    if (!t) continue;
+                    if (t.indexOf('Editar') === -1 && t.indexOf('Deletar') === -1) continue;
+                    var r = e.getBoundingClientRect();
+                    out.push({tag:e.tagName, cls:(e.className||'').toString().slice(0,60), t:t.slice(0,30), w:Math.round(r.width), h:Math.round(r.height), x:Math.round(r.x), y:Math.round(r.y)});
+                }
+                return JSON.stringify(out);
+            """)
             raise Exception(
-                f"Formulário de edição não abriu (menu={menu_result}, editar={editar_result})"
+                f"Formulário de edição não abriu (menu={menu_result}, editar={editar_result}) MENU_DUMP: {menu_dump}"
             )
         time.sleep(0.5)
 
