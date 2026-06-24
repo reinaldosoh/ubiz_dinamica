@@ -352,7 +352,7 @@ class DinamicaRequest(BaseModel):
     is_test: bool = False  # Se True, adiciona "OBS: ENVIADO COMO TESTE" no webhook
     teste: bool = False  # alias usado pelo Radar
     corridas_stats: Optional[CorridasStats] = None  # Estatísticas passadas por quem chama a API
-    area_busca: str = "***Geral"  # termo de busca do card manual no TaxiMachine Cloud (por cidade/projeto)
+    area_busca: str = "***Geral Manual"  # termo de busca do card manual no TaxiMachine Cloud (por cidade/projeto)
 
 class DinamicaResponse(BaseModel):
     success: bool
@@ -394,7 +394,7 @@ async def health():
         "memory_mb": round(memory_mb, 2),
         "active_executions": active_executions,
         "mode": "parallel",
-        "version": "3.2.0-editar-direto"
+        "version": "3.3.0-area-default-manual"
     }
 
 @app.post("/driver/close")
@@ -533,7 +533,7 @@ async def atualizar_dinamica(request: DinamicaRequest):
             active_executions -= 1
         raise HTTPException(status_code=400, detail="email e password são obrigatórios")
     
-    area_busca = (request.area_busca or "***Geral").strip() or "***Geral"
+    area_busca = (request.area_busca or "***Geral Manual").strip() or "***Geral Manual"
     driver = None
     is_new_driver = True
     form_debug = ""
